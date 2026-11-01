@@ -1,0 +1,119 @@
+# Prusament PETG colours with their measured hex code and transmission distance (TD, mm).
+# Source: Prusa Research, "HueForge filament transparency values and hexcodes"
+# https://help.prusa3d.com/article/hueforge-filament-transparency-values-and-hexcodes_762314
+# (read on 2026-11-01). Prusa measured these values for HueForge; lithophane-forge uses TD
+# as the thickness that lets about 10 % of the light through, which is an approximation.
+# Rows without a TD on that page are left out.
+
+source = "https://help.prusa3d.com/article/hueforge-filament-transparency-values-and-hexcodes_762314"
+material = "petg"
+
+[[filament]]
+name = "Prusament PETG Signal White"
+hex = "#E5E0E1"
+td = 3.4
+
+[[filament]]
+name = "Prusament PETG V0 Natural"
+hex = "#DEE2D8"
+td = 10.4
+
+[[filament]]
+name = "Prusament PETG Clear"
+hex = "#E4E7E3"
+td = 100.0
+
+[[filament]]
+name = "Prusament PETG Mango Yellow"
+hex = "#F2B706"
+td = 2.6
+
+[[filament]]
+name = "Prusament PETG Yellow Gold"
+hex = "#9A8523"
+td = 9.2
+
+[[filament]]
+name = "Prusament PETG Prusa Orange"
+hex = "#EB5403"
+td = 6.2
+
+[[filament]]
+name = "Prusament PETG Prusa Orange Transparent"
+hex = "#F17230"
+td = 44.2
+
+[[filament]]
+name = "Prusament PETG Lipstick Red"
+hex = "#BB2E32"
+td = 2.6
+
+[[filament]]
+name = "Prusament PETG Carmine Red Transparent"
+hex = "#B5422F"
+td = 6.2
+
+[[filament]]
+name = "Prusament PETG Terracotta Light"
+hex = "#B87F69"
+td = 1.5
+
+[[filament]]
+name = "Prusament PETG Pistachio Green"
+hex = "#93A682"
+td = 0.9
+
+[[filament]]
+name = "Prusament PETG Jungle Green"
+hex = "#007248"
+td = 0.5
+
+[[filament]]
+name = "Prusament PETG Neon Green Transparent"
+hex = "#A6EC5E"
+td = 75.0
+
+[[filament]]
+name = "Prusament PETG Chalky Blue"
+hex = "#6F9AA9"
+td = 0.6
+
+[[filament]]
+name = "Prusament PETG Ocean Blue"
+hex = "#1A4C54"
+td = 3.0
+
+[[filament]]
+name = "Prusament PETG Ultramarine Blue Transparent"
+hex = "#2B3B60"
+td = 8.0
+
+[[filament]]
+name = "Prusament PETG Urban Grey"
+hex = "#95908C"
+td = 0.5
+
+[[filament]]
+name = "Prusament PETG Anthracite Grey"
+hex = "#3F4646"
+td = 0.3
+
+[[filament]]
+name = "Prusament PETG Tungsten 75%"
+hex = "#545251"
+td = 0.3
+
+[[filament]]
+name = "Prusament PETG Prusa Galaxy Black"
+hex = "#494546"
+td = 0.2
+
+[[filament]]
+name = "Prusament PETG Matte Black"
+hex = "#303635"
+td = 0.3
+
+[[filament]]
+name = "Prusament PETG Jet Black"
+hex = "#292B2B"
+td = 0.3

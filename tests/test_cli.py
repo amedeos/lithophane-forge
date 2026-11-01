@@ -36,7 +36,7 @@ def test_there_are_examples():
 def test_examples_parse(argv, monkeypatch, tmp_path, photo):
     """The documented commands parse and reach their handler (the work itself is skipped)."""
     calls = []
-    for name in ("cmd_make", "cmd_analyze", "cmd_printers"):
+    for name in ("cmd_make", "cmd_analyze", "cmd_calibrate", "cmd_printers"):
         monkeypatch.setattr(lithophane_forge, name, lambda a, n=name: calls.append(n) or 0)
     args = [str(photo) if a.endswith((".jpg", ".png")) else a for a in argv[1:]]
     assert main(args) == 0

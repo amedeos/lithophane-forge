@@ -79,3 +79,24 @@ def thumbnail(im: Image.Image, size: int = 256) -> bytes:
     buf = io.BytesIO()
     square.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def colour(lin: np.ndarray, mask=None) -> Image.Image:
+    """A simulated colour print (linear RGB per grid point, as the viewer sees it)."""
+    return _u8(_masked(linear_to_srgb(np.clip(lin, 0, 1)), mask))
+
+
+def palette_strip(plan, layer: float, width: int = 260, row: int = 56) -> Image.Image:
+    """The filaments of the print from the bed up: swatch, name, where it starts."""
+    font = ImageFont.load_default(size=15)
+    small = ImageFont.load_default(size=12)
+    fils = plan.real.filaments
+    im = Image.new("RGB", (width, row * len(fils) + 8), BACKGROUND)
+    draw = ImageDraw.Draw(im)
+    for k, (f, z) in enumerate(zip(fils, plan.real.starts)):
+        y = 4 + row * (len(fils) - 1 - k)  # the first filament at the bottom
+        draw.rectangle([4, y + 4, 48, y + row - 6], fill=f.hex, outline=INK)
+        draw.text((58, y + 6), f.name.replace("Prusament ", ""), fill=INK, font=font)
+        start = "first filament" if k == 0 else f"M600 at Z {z + layer:.2f} mm"
+        draw.text((58, y + 28), f"{start}, TD {f.td:g}", fill=INK, font=small)
+    return im

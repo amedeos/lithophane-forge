@@ -122,3 +122,44 @@ def test_shapes_and_accessories_slice(kw, tmp_path):
     for name, info in res.sliced.items():
         assert float(info["filament_g"]) > 0.5, name
     assert set(res.sliced) == {"lithophane", *res.accessories}
+
+
+def test_colour_changes_reach_the_gcode(tmp_path):
+    """The M600s in the sliced G-code are exactly the planned ones."""
+    import json
+
+    import numpy as np
+    from PIL import Image
+    from test_palette import sunset
+
+    photo = tmp_path / "sunset.png"
+    Image.fromarray((sunset(90, 120) * 255).astype(np.uint8)).save(photo)
+    setup = printers.setup("mk4", "petg")
+    j = Job(
+        photo=photo,
+        setup=setup,
+        optics=DEFAULTS["petg"],
+        out=tmp_path / "out",
+        mode="color",
+        colors=3,
+        width=50,
+        pitch=0.5,
+    )
+    res = forge.make(j)
+    planned = [
+        z for z, _ in json.loads(res.files["plan"].read_text(encoding="utf-8"))["colour_changes"]
+    ]
+    out = tmp_path / "check.gcode"
+    with slicer.datadir(setup, profiles.find_bundle(), slicer.command()) as dd:
+        slicer.run(slicer.command(), res.files["3mf"], out, extra=tuple(dd))
+    assert slicer.summary(out)["m600_z"] == pytest.approx(planned)
+
+
+def test_calibration_slices(tmp_path):
+    from lithophane_forge import calibrate
+
+    job = calibrate.default_job(
+        printers.setup("mk4", "petg"), DEFAULTS["petg"], tmp_path, pitch=0.5
+    )
+    res = calibrate.make(job)
+    assert float(res.sliced["calibration"]["filament_g"]) > 5

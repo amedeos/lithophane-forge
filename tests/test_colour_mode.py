@@ -1,0 +1,59 @@
+import json
+import zipfile
+
+import numpy as np
+import pytest
+import trimesh
+from PIL import Image
+from test_palette import sunset
+
+from lithophane_forge import forge, threemf
+from lithophane_forge.forge import Job
+
+
+@pytest.fixture
+def sunset_photo(tmp_path):
+    path = tmp_path / "sunset.png"
+    Image.fromarray((sunset(120, 160) * 255).astype(np.uint8)).save(path)
+    return path
+
+
+@pytest.mark.parametrize("shape", ["flat", "shaped"])
+def test_colour_make(sunset_photo, setup, petg, tmp_path, no_slicer, shape):
+    j = Job(
+        photo=sunset_photo,
+        setup=setup,
+        optics=petg,
+        out=tmp_path / "out",
+        shape=shape,
+        mode="color",
+        colors=3,
+        width=60,
+        pitch=0.4,
+    )
+    res = forge.make(j)
+    plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
+    assert plan["mode"] == "color" and plan["pose"] == "lying"
+    changes = plan["colour_changes"]
+    assert len(changes) == len(plan["colour"]["print"]["filaments"]) - 1 >= 1
+    with zipfile.ZipFile(res.files["3mf"]) as z:
+        xml = z.read(threemf.M600).decode()
+    for zv, colour in changes:
+        assert f'print_z="{zv:.3f}"' in xml and colour in xml
+    tm = trimesh.load(res.files["stl"])
+    assert tm.bounds[1][2] <= j.color_range[1] + 1e-6  # nothing above the stack
+    report = res.files["report"].read_text(encoding="utf-8")
+    assert "M600" in report and "Ideal colours" in report
+
+
+def test_colour_mode_checks(setup, petg, tmp_path):
+    with pytest.raises(ValueError, match="lying"):
+        Job(photo=tmp_path / "x", setup=setup, optics=petg, mode="color", shape="curved").check()
+    with pytest.raises(ValueError, match="--colors"):
+        Job(photo=tmp_path / "x", setup=setup, optics=petg, mode="color", colors=12).check()
+
+
+def test_colour_frame_is_the_whole_stack(setup, petg, tmp_path):
+    j = Job(photo=tmp_path / "x", setup=setup, optics=petg, mode="color")
+    assert j.frame_thickness == forge.COLOR_RANGE[1]
+    assert not j.standing

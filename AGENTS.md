@@ -8,7 +8,7 @@ Guidance for coding agents working in this repository.
 
 - **Printer:** Prusa MK4 (Input Shaper firmware) with **one extruder**: no MMU. Colours come only from M600 colour changes by layer height. Other Prusa printers are in `printers.PRINTERS`.
 - **Material:** **PETG** by default (`--material pla` for PLA). The thickness defaults in `optics.DEFAULTS` are estimates until the owner calibrates a spool.
-- **Modes:** mono (white filament) is done: flat, curved and cylinder panels print **standing** (thickness along y or radial), shaped panels print **lying** (thickness along z). Colour (M600 changes, printed **lying**, thickness along z, backlit, ideal colours found from the photo and then matched to real PETG) is planned, together with the calibration print. The colour analysis must not depend on the filaments the owner has; owned filaments come in only through an explicit option.
+- **Modes:** mono (white filament): flat, curved and cylinder panels print **standing** (thickness along y or radial), shaped panels print **lying** (thickness along z). Colour (`--mode color`): M600 changes, flat or shaped, printed **lying**, backlit; the ideal colours come from the photo alone and only then are matched to real PETG (Prusa's published hex and TD values) or to `--filaments`. The colour analysis must not depend on the filaments the owner has; owned filaments come in only through that explicit option.
 - **License:** GPL-3.0-only.
 
 ## Language
@@ -23,10 +23,13 @@ Guidance for coding agents working in this repository.
 
 ```sh
 uv sync
-uv run pytest                     # ~20 s; -m "not slicer" skips the PrusaSlicer runs
+uv run pytest                     # ~50 s; -m "not slicer" skips the PrusaSlicer runs
 uv run ruff check . && uv run ruff format --check .
 uv run lithophane-forge analyze PHOTO
 uv run lithophane-forge make PHOTO [--shape flat|curved] [--width MM] [--height MM] [--slice]
+uv run lithophane-forge make PHOTO --mode color [--colors N] [--filaments FILE]
+uv run lithophane-forge analyze PHOTO --colors N
+uv run lithophane-forge calibrate [--slice]
 uv run lithophane-forge printers
 ```
 
@@ -48,7 +51,11 @@ uv run lithophane-forge printers
 | `accessories.py` | build123d parts: `frame_ring`, `tab` (rectangle with a round top and a hole clear of the outline), `stand`, `lamp_base`; `to_mesh` merges the tessellation into a closed mesh; `remap` swaps axes |
 | `threemf.py` | Our own 3MF writer: multi-volume objects, per-object settings, M600 list, thumbnail, full config |
 | `slicer.py` | PrusaSlicer CLI: temporary `--datadir`, slice, summary, config from G-code |
-| `render.py` | Simulated backlit view, relief hillshade, preview sheet, thumbnail |
+| `render.py` | Simulated backlit view, relief hillshade, simulated colour print, palette strip, preview sheet, thumbnail |
+| `palette.py` | Colour mode: light model of a stack (per-channel Beer-Lambert from hex and td), `Fitter` (ideal colours, td and change heights with Powell; `choose` picks real filaments by their effect on the whole print), `plan()`, `assign()`, CIELAB helpers |
+| `data/petg_catalog.toml` | Prusament PETG hex and TD values from Prusa's HueForge table (source URL inside) |
+| `calibrate.py` | The calibration strip: steps of known thickness with glowing labels, same settings as a lithophane |
+| `examples/filaments.toml` | Example `--filaments` list: the owner's shelf from 3d-linux, td estimated |
 | `tests/` | pytest suite. Keep it green. `slicer`-marked tests need PrusaSlicer |
 
 ## How a lithophane is built
@@ -61,6 +68,13 @@ uv run lithophane-forge printers
 - **Shaped panels.** The grid cells whose centre lies inside the outline inset by half the frame width form the lithophane (`mesh.lying_masked`): its edge is stepped. The frame (build123d, the full frame width inside the outline) is a second volume of the same object and covers the steps; PrusaSlicer joins the two. Standing shaped panels would need support under the lower half of the outline, so they print lying.
 - **Cylinder.** The grid wraps around (`mesh.arc(wrap=True)`); the frame is only at the top and bottom (rims). The middle of the picture faces −y, the seam is at the back. The default height is 1.25 × the diameter; `cylinder_notes` says how much of the photo is cropped and which `--repeat` fits it.
 - **Accessories.** Stand (slot `frame_t + 2 × 0.10` mm, as deep as the frame) and lamp base (recess `diameter + 2 × 0.30` mm, LED pocket, cable notch) are separate 3MF projects with `layer_height = 0.2` as an object setting.
+
+## How a colour print is chosen
+
+- **Model.** A filament with linear colour c and transmission distance td has per-channel attenuation a = ln(10) / td × ln(c) / ln(Y(c)): a grey lets 10 % through at t = td on every channel, a coloured filament passes its own colour. A point of height h holds filament k between `starts[k]` and `starts[k+1]`; the light through it is exp(−Σ d_k a_k). The viewer's white is light through the thinnest stack of white PETG (td 3.4).
+- **Fit.** `Fitter.cost` is the mean weighted CIELAB distance (lightness × 1.5) from 3000 sampled pixels to the path sampled at every layer top. `ideal()` moves grey level and td of the base (kept light, neutral, td ≥ 2) and colour and td of the others, plus the change heights; it never returns something worse than its start. `plan()` runs it from two k-means starts, picks real filaments (`choose`: the closest colour first, then two rounds of trying every filament at every position by its effect on the cost), fits the heights again, and runs `ideal()` once more from the real answer, so the ideal is never worse than the real one.
+- **Heights.** Changes sit on layer tops; the M600 is at the top of the first layer of the new filament (`Fit.colour_changes`). `assign()` gives every pixel its height (same weighted distance), then a 3 × 3 median filter smooths the surface. The frame is the whole stack (`color_range[1]`).
+- **Checks.** `tests/test_slicer.py` slices a colour project and compares the G-code's M600 heights with `plan.json`.
 
 ## Frames
 
