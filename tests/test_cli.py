@@ -41,6 +41,8 @@ def test_examples_parse(argv, monkeypatch, tmp_path, photo):
     args = [str(photo) if a.endswith((".jpg", ".png")) else a for a in argv[1:]]
     assert main(args) == 0
     assert calls
+    if args[0] == "make":  # the options also fit together (mode, shape, tone ...)
+        lithophane_forge.job_from(lithophane_forge.parser().parse_args(args)).check()
 
 
 def test_make_writes_files(photo, tmp_path, no_slicer, capsys):
@@ -52,6 +54,23 @@ def test_make_writes_files(photo, tmp_path, no_slicer, capsys):
     assert "triangles" in out and (tmp_path / "o" / "photo" / "photo.3mf").is_file()
 
 
+@pytest.mark.parametrize(
+    "argv, mode",
+    [
+        ([], "color"),
+        (["--shape", "shaped"], "color"),
+        (["--mode", "mono"], "mono"),
+        (["--shape", "curved"], "mono"),
+        (["--shape", "cylinder"], "mono"),
+    ],
+)
+def test_colour_is_the_default(photo, argv, mode):
+    """Flat and shaped panels print in colour, lying; curved panels and cylinders stand."""
+    from lithophane_forge import job_from, parser
+
+    assert job_from(parser().parse_args(["make", str(photo), *argv])).mode == mode
+
+
 def test_analyze(photo, capsys):
     assert main(["analyze", str(photo)]) == 0
     assert "lightness" in capsys.readouterr().out
@@ -61,9 +80,15 @@ def test_analyze(photo, capsys):
     "argv, message",
     [
         (["make", "missing.jpg"], "no such photo"),
-        (["make", "{photo}", "--t-min", "3", "--t-max", "2"], "t_min < t_max"),
+        (["make", "{photo}", "--mode", "mono", "--t-min", "3", "--t-max", "2"], "t_min < t_max"),
+        (["make", "{photo}", "--t-min", "3", "--t-max", "2"], "range 3 to 2 mm"),
         (["make", "{photo}", "--crop", "1,2,3"], "X,Y,W,H"),
-        (["make", "{photo}", "--height", "500", "--pitch", "1"], "prints at most"),
+        (
+            ["make", "{photo}", "--mode", "mono", "--height", "500", "--pitch", "1"],
+            "prints at most",
+        ),
+        (["make", "{photo}", "--height", "500", "--pitch", "1"], "does not fit"),
+        (["make", "{photo}", "--clahe", "0.01"], "--mode mono"),
     ],
 )
 def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):

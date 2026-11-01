@@ -93,7 +93,10 @@ class Job:
                 raise ValueError("--colors must be between 2 and 8")
             lo, hi = self.color_range
             if not 0.3 <= lo < hi:
-                raise ValueError(f"colour thickness range {lo}..{hi} mm is not valid")
+                raise ValueError(
+                    f"colour thickness range {lo:g} to {hi:g} mm is not valid: --t-min must "
+                    "be at least 0.3 and smaller than --t-max"
+                )
             from .palette import heights
 
             n = len(heights(lo, hi, self.setup.first_layer, self.setup.layer))
@@ -104,7 +107,7 @@ class Job:
                     f"{max(self.colors, 2)}: widen --t-min/--t-max"
                 )
             if self.tone.invert or self.tone.clahe > 0:
-                raise ValueError("--invert and --clahe work in mono mode only")
+                raise ValueError("--invert and --clahe work in mono mode only (--mode mono)")
         if self.hole and self.shape not in ("flat", "shaped"):
             raise ValueError("--hole works with the flat and shaped panels")
         if self.stand and self.shape != "flat":

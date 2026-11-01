@@ -8,16 +8,19 @@ __version__ = "0.1.0"
 
 EXAMPLES = """\
 examples:
-  lithophane-forge analyze photo.jpg
-  lithophane-forge make photo.jpg --width 120
+  lithophane-forge analyze photo.jpg --colors 4
+  lithophane-forge make photo.jpg --width 120 --slice
+  lithophane-forge make photo.jpg --colors 5 --width 150
+  lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
+  lithophane-forge make photo.jpg --mode mono --width 120
   lithophane-forge make photo.jpg --shape curved --height 100 --arc 110
   lithophane-forge make photo.jpg --shape cylinder --diameter 80 --repeat 2 --lamp-base
-  lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
-  lithophane-forge make photo.jpg --mode color --colors 4 --width 120 --slice
-  lithophane-forge analyze photo.jpg --colors 4
-  lithophane-forge make photo.jpg --printer coreone --material pla --slice
+  lithophane-forge make photo.jpg --printer coreone --slice
   lithophane-forge calibrate --slice
   lithophane-forge printers
+
+make prints in colour, lying on the bed, with filament changes (M600); --mode mono
+prints white filament standing. Curved panels and cylinders always print mono.
 """
 
 
@@ -89,8 +92,9 @@ def parser() -> argparse.ArgumentParser:
     size.add_argument(
         "--mode",
         choices=MODES,
-        default="mono",
-        help="mono: white filament; color: filament changes (M600), printed lying",
+        help="color (the default for flat and shaped panels): filament changes (M600), "
+        "printed lying; mono: white filament, printed standing (always for curved and "
+        "cylinder)",
     )
     size.add_argument(
         "--width",
@@ -234,7 +238,8 @@ def job_from(args: argparse.Namespace):
             args.print_preset,
             args.filament_preset,
         )
-        mono = args.mode == "mono"
+        mode = args.mode or ("color" if args.shape in ("flat", "shaped") else "mono")
+        mono = mode == "mono"
         opt = optics.optics(
             args.material, args.t_min if mono else None, args.t_max if mono else None, args.td
         )
@@ -255,7 +260,7 @@ def job_from(args: argparse.Namespace):
         out=args.out,
         name=args.name,
         shape=args.shape,
-        mode=args.mode,
+        mode=mode,
         colors=args.colors,
         filaments=args.filaments,
         allow_abrasive=args.allow_abrasive,
@@ -294,7 +299,8 @@ def cmd_make(args) -> int:
     sx, sy, sz = res.size
     lay = res.layout
     print(
-        f"{job.stem}: {job.shape}, {sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, "
+        f"{job.stem}: {job.shape}, {job.mode}, printed {'standing' if job.standing else 'lying'}"
+        f", {sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, "
         f"grid {lay.cols} x {lay.rows} at {lay.pitch:.2f} mm, "
         f"{res.triangles:,} triangles, {res.volume_cm3:.1f} cm3"
     )
@@ -342,7 +348,10 @@ def cmd_analyze(args) -> int:
         f"near black {a.shadows:.0%}, near white {a.highlights:.0%}, "
         f"colourfulness {a.colourfulness:.0f}"
     )
-    for note in a.notes or ["looks fine for a lithophane"]:
+    # with --colors the colour plan says how well the colours fit; the mono warning about
+    # colourful photos does not apply
+    notes = [n for n in a.notes if not (args.colors and "colourful" in n)]
+    for note in notes or ["looks fine for a lithophane"]:
         print(f"- {note}")
     if args.colors:
         from . import palette, printers

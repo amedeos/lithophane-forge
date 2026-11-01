@@ -1,17 +1,17 @@
 # 🖼️ lithophane-forge
 
-Turn a photo into a 3D-printable lithophane, with a ready-to-print PrusaSlicer project for your Prusa printer (Original Prusa MK4 and white PETG by default). It also makes colour lithophanes on a printer with one extruder: it finds the ideal colours for the photo, picks real PETG filaments for them and plans the filament changes. Everything runs on the command line, on the CPU, in a few seconds. You need no GPU and no neural network.
+Turn a photo into a colour lithophane for a Prusa printer with one extruder, with a ready-to-print PrusaSlicer project (Original Prusa MK4 and Prusament PETG by default). The tool finds the ideal colours for the photo, picks real PETG filaments for them and plans the filament changes. The panel prints lying on the bed, and the printer stops at each change so that you can load the next filament. It also makes classic white lithophanes (`--mode mono`): flat and curved panels and lamp cylinders, printed standing. Everything runs on the command line, on the CPU, in a few seconds. You need no GPU and no neural network.
 
 ## How it works
 
-- The photo's lightness is cleaned up (levels, optional local contrast, gamma) and turned into the light you want to see.
-- Light through plastic falls off exponentially (Beer-Lambert), so each point gets the thickness that lets the right amount of light through: thin is bright, thick is dark.
-- numpy turns the thickness map into a closed mesh with a frame: a flat panel, a curved one that stands on its own, a cylinder for a lamp, or a shaped panel (heart, oval, circle, or your own outline).
-- Flat, curved and cylinder panels print standing, for the finest detail. Under every thick part, the plastic slopes down at no more than 60° from vertical, so they print without supports. Shaped panels print lying on the bed, so their outline needs no support either.
+- **Colour (the default).** A printer with one extruder changes colour only between layers, so the panel prints lying and every point is a stack of filaments cut at its own height. Lit from behind, each height shows one colour. The tool finds the colours and the change heights that bring the print closest to the photo, then gives every point its height (see Colour lithophanes).
+- **Mono (`--mode mono`).** The photo's lightness is cleaned up (levels, optional local contrast, gamma) and turned into thickness in white filament: thin is bright, thick is dark. Light through plastic falls off exponentially (Beer-Lambert).
+- numpy turns the height map into a closed mesh with a frame: a flat panel or a shaped one (heart, oval, circle, or your own outline). In mono there are also curved panels that stand on their own and cylinders for a lamp.
+- Colour and shaped panels print lying on the bed and need no support. Mono flat, curved and cylinder panels print standing, for the finest tones. Under every thick part the plastic slopes down at no more than 60° from vertical, so they print without supports.
 - build123d makes the plain parts: the frame of a shaped panel, a hanging tab, a stand for flat panels and a lamp base with a pocket for an LED.
-- The 3MF is a PrusaSlicer project: the printer, print and filament presets are the official Prusa ones, and the object carries its own settings (100 % infill, enough perimeters, rear seam, brim).
+- The 3MF is a PrusaSlicer project: the printer, print and filament presets are the official Prusa ones, the object carries its own settings, and in colour the filament changes are already in place.
 - With `--slice` you also get the G-code (binary `.bgcode` on the MK4), ready for the printer.
-- `calibrate` prints a strip of known thicknesses, so you can measure your own spool.
+- `calibrate` prints a strip of known thicknesses, so you can measure your white spool for mono prints.
 
 ## Requirements
 
@@ -20,25 +20,25 @@ Turn a photo into a 3D-printable lithophane, with a ready-to-print PrusaSlicer p
 
 ```sh
 uv sync
-uv run lithophane-forge analyze photo.jpg                 # advice before printing
-uv run lithophane-forge make photo.jpg --width 120        # flat panel, MK4, white PETG
-uv run lithophane-forge make photo.jpg --shape curved --height 100 --arc 110
-uv run lithophane-forge make photo.jpg --width 120 --stand --hole
-uv run lithophane-forge make photo.jpg --shape cylinder --diameter 80 --repeat 2 --lamp-base
+uv run lithophane-forge analyze photo.jpg --colors 4      # advice and ideal colours, no files
+uv run lithophane-forge make photo.jpg --width 120 --slice    # colour, lying, MK4, PETG
+uv run lithophane-forge make photo.jpg --colors 5 --width 150
+uv run lithophane-forge make photo.jpg --filaments examples/filaments.toml
 uv run lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
 uv run lithophane-forge make photo.jpg --shape shaped --mask outline.svg --width 100
-uv run lithophane-forge analyze photo.jpg --colors 4             # ideal colours, no files
-uv run lithophane-forge make photo.jpg --mode color --colors 4 --width 120 --slice
-uv run lithophane-forge make photo.jpg --mode color --filaments examples/filaments.toml
+uv run lithophane-forge make photo.jpg --width 120 --stand --hole
+uv run lithophane-forge make photo.jpg --mode mono --width 120 --slice    # white, standing
+uv run lithophane-forge make photo.jpg --mode mono --height 80 --gamma 0.8 --clahe 0.01
+uv run lithophane-forge make photo.jpg --shape curved --height 100 --arc 110    # always mono
+uv run lithophane-forge make photo.jpg --shape cylinder --diameter 80 --repeat 2 --lamp-base
 uv run lithophane-forge calibrate --slice                 # measure your white filament
 uv run lithophane-forge make photo.jpg --printer mk4s --slice
-uv run lithophane-forge make photo.jpg --height 80 --gamma 0.8 --clahe 0.01
 uv run lithophane-forge printers                          # supported printers and presets
 ```
 
 ## Step by step
 
-From a photo on your computer to a lit lithophane on your shelf. The examples use an Original Prusa MK4 and white PETG, the defaults.
+From a photo on your computer to a lit colour lithophane on your shelf. The examples use an Original Prusa MK4 and Prusament PETG, the defaults.
 
 ### 1. Install
 
@@ -53,52 +53,48 @@ uv run lithophane-forge printers                          # checks PrusaSlicer's
 
 If `printers` cannot find PrusaSlicer's profiles, set `LITHOPHANE_FORGE_PROFILES` to the folder that holds `PrusaResearch.ini`. If PrusaSlicer is not on the PATH (for example the Flatpak), set `PRUSA_SLICER` as shown under Requirements.
 
-### 2. Calibrate your white filament (once per spool)
+### 2. Choose a photo and check it
 
-```sh
-uv run lithophane-forge calibrate --slice
-```
-
-Print `out/calibration-petg/calibration-petg.bgcode` (about 1 hour 20 minutes on the MK4), hold the strip against the light you will use, and follow `out/calibration-petg/report.md`. Write down three numbers: `--t-min`, `--t-max` and `--td`. Without them the tool uses estimates for white PETG, which work, but your own numbers give truer tones.
-
-### 3. Choose a photo and check it
-
-Copy the photo into `photos/` (git ignores it) and ask for advice:
-
-```sh
-uv run lithophane-forge analyze photos/lake.jpg
-```
-
-Good photos have a clear subject, good contrast and few large black areas: black prints at full thickness and shows no detail. A lithophane shows only lightness, so a blue sky and green grass of the same lightness look the same. `analyze` warns you about these cases.
-
-### 4. Make the lithophane
-
-```sh
-uv run lithophane-forge make photos/lake.jpg --width 120 --t-min 0.8 --t-max 3.4 --td 2.1 --slice
-```
-
-Use your own numbers from step 2. `--width` or `--height` sets the size in mm; `--shape curved`, `cylinder` or `shaped` change the form (see Options). Everything lands in `out/lake/`.
-
-### 5. Look before you print
-
-Open `out/lake/preview.png`: it shows the photo, the panel lit from behind (simulated) and the relief. If the picture is too dark, try `--gamma 0.8`; if it is flat, try `--clahe 0.01`; to keep only part of the photo, use `--crop X,Y,W,H`. Run `make` again until you like the preview: with `--slice` it takes about a minute.
-
-### 6. Print
-
-Copy `out/lake/lake.bgcode` to the printer (USB stick, PrusaLink or Prusa Connect), or open `out/lake/lake.3mf` in PrusaSlicer to check it first. Load white PETG. A flat, curved or cylinder panel prints standing with a brim; a 120 mm panel takes about 3 to 5 hours. `out/lake/report.md` sums up the settings and the estimate.
-
-### 7. Light it
-
-Remove the brim with care and put a diffuse, neutral white LED (about 4000 K) behind the panel. By default the flat face looks at you.
-
-### 8. Try colour (optional)
+Copy the photo into `photos/` (git ignores it) and ask for advice and colours:
 
 ```sh
 uv run lithophane-forge analyze photos/sunset.jpg --colors 4
-uv run lithophane-forge make photos/sunset.jpg --mode color --colors 4 --width 120 --slice
 ```
 
-Sunsets, portraits and sepia photos work best (see Colour lithophanes). `out/sunset/report.md` lists the filament to load first and the height of every change. The printer stops at each change (M600) and asks you to load the next filament. The panel prints lying, in about 2 hours for 120 mm.
+You get advice on the photo's lightness, the ideal colours, the Prusament PETG filaments that come closest and how close the print gets (mean ΔE: below about 5 it is very close to the photo, above about 10 you see the difference). One extruder can show only the colours on one path from light to dark, so sunsets, portraits and sepia photos work best; a blue sky next to an orange horizon does not fit one path.
+
+### 3. Make the lithophane
+
+```sh
+uv run lithophane-forge make photos/sunset.jpg --width 120 --slice
+```
+
+This makes a colour panel 120 mm wide with 4 filaments, printed lying. `--colors N` changes the number of filaments (2 to 8), `--shape shaped --mask heart` gives it a shape, `--hole` adds a hanging tab (see Options). Everything lands in `out/sunset/`.
+
+### 4. Look before you print
+
+Open `out/sunset/preview.png`: it shows the photo, the print with the ideal colours, the print with the suggested filaments (both simulated) and the stack of filaments with their change heights. Try `--colors 3` or `--colors 5`, `--gamma 0.8` for a darker photo, or `--crop X,Y,W,H` to keep only part of it. Run `make` again until you like the preview: with `--slice` it takes about a minute.
+
+### 5. Get the filaments
+
+`out/sunset/report.md` lists the filaments in printing order, and the ideal colour next to each. If you want to use the spools you already have, write them into a TOML file like `examples/filaments.toml` (name, hex colour, TD) and pass `--filaments yours.toml`: the plan then picks only from your list.
+
+### 6. Print
+
+Copy `out/sunset/sunset.bgcode` to the printer (USB stick, PrusaLink or Prusa Connect), or open `out/sunset/sunset.3mf` in PrusaSlicer to check it first. Load the first filament in `report.md`. The panel prints lying, flat face down, in about 2 hours for 120 mm. At each change the printer stops (M600) and asks for the next filament: load the one `report.md` names for that height.
+
+### 7. Light it
+
+Put a diffuse, neutral white LED (about 4000 K) behind the panel. By default the face that lay on the bed looks at you, so a smooth or satin sheet gives the cleanest result.
+
+### 8. White lithophanes (optional)
+
+```sh
+uv run lithophane-forge calibrate --slice
+uv run lithophane-forge make photos/lake.jpg --mode mono --width 120 --t-min 0.8 --t-max 3.4 --td 2.1 --slice
+```
+
+`--mode mono` makes a classic lithophane in white PETG. It prints standing with a brim, for the finest tones, and a 120 mm panel takes about 3 to 5 hours. Curved panels and cylinders are always mono. Print the calibration strip first (about 1 hour 20 minutes), read it with `out/calibration-petg/report.md`, and pass your own `--t-min`, `--t-max` and `--td`.
 
 ## Output
 
@@ -116,21 +112,22 @@ Put the photos you want to try in `photos/`: git ignores everything in it, so yo
 
 ## Options
 
+- **Mode:** colour by default for flat and shaped panels: filament changes, printed lying. `--mode mono` makes a white lithophane printed standing; curved panels and cylinders are always mono.
 - **Size and shape:** `--width` and `--height` are the outer size in mm, frame included; give one and the photo sets the other, or both to crop the photo. `--frame` sets the frame width (0 for none).
-- **Curved:** `--shape curved` bends the panel on an arc of `--arc` degrees, 10 to 300 (the width is the arc length on the outside).
-- **Cylinder:** `--shape cylinder --diameter D --height H` (the height is 1.25 × the diameter if you leave it out). The picture goes once around; a normal photo then loses its top and bottom, so `--repeat 2` puts it around twice (the tool suggests the best number). `--lamp-base` adds a base with a pocket for an LED tealight or puck light (`--led-diameter`, `--led-height`) and a notch for a cable.
+- **Curved (mono):** `--shape curved` bends the panel on an arc of `--arc` degrees, 10 to 300 (the width is the arc length on the outside).
+- **Cylinder (mono):** `--shape cylinder --diameter D --height H` (the height is 1.25 × the diameter if you leave it out). The picture goes once around; a normal photo then loses its top and bottom, so `--repeat 2` puts it around twice (the tool suggests the best number). `--lamp-base` adds a base with a pocket for an LED tealight or puck light (`--led-diameter`, `--led-height`) and a notch for a cable.
 - **Shaped:** `--shape shaped --mask heart|oval|circle`, or `--mask` with an SVG file (its largest closed shape) or a PNG file (dark pixels are the shape). An oval takes the photo's proportions, a circle stays round. The frame follows the outline.
 - **Extras:** `--hole` adds a hanging tab with a 5 mm hole (flat and shaped panels); `--stand` makes a stand with a slot for a flat panel.
-- **Colour:** `--mode color --colors N` (2 to 8 filaments), `--filaments FILE` for your own list, `--t-min`/`--t-max` for the height range of the stack (0.6 to 3.0 mm by default), `--allow-abrasive` to also use filaments that need a hardened steel nozzle. See below.
-- **Picture:** `--crop X,Y,W,H` (photo pixels; the panel takes the crop's shape unless you give both sizes), `--levels LOW,HIGH` (percentiles that become black and white), `--gamma`, `--clahe` (local contrast), `--invert` (a negative in lightness), `--view relief` (the relief faces the viewer instead of the flat face).
-- **Thickness:** `--t-min`, `--t-max` and `--td` (mm of your filament that let 10 % of the light through). The defaults for white PETG (0.8, 3.6 and 2.3 mm) are estimates: calibrate your spool for the best result.
+- **Colour:** `--colors N` (2 to 8 filaments, 4 by default), `--filaments FILE` for your own list, `--t-min`/`--t-max` for the height range of the stack (0.6 to 3.0 mm by default), `--allow-abrasive` to also use filaments that need a hardened steel nozzle. See below.
+- **Picture:** `--crop X,Y,W,H` (photo pixels; the panel takes the crop's shape unless you give both sizes), `--levels LOW,HIGH` (percentiles that become black and white), `--gamma`, `--clahe` (local contrast, mono only), `--invert` (a negative in lightness, mono only), `--view relief` (the relief faces the viewer instead of the flat face).
+- **Thickness (mono):** `--t-min`, `--t-max` and `--td` (mm of your filament that let 10 % of the light through). The defaults for white PETG (0.8, 3.6 and 2.3 mm) are estimates: calibrate your spool for the best result. In colour, `--t-min` and `--t-max` set the height range of the stack.
 - **Printer:** `--printer` (`mk4`, `mk4s`, `mk3.5`, `mk3s`, `coreone`, `coreonel`, `xl`, `mini`), `--material petg|pla`, or your own presets with `--printer-preset`, `--print-preset` and `--filament-preset`.
 - **Detail:** `--pitch` (mm between grid points, 0.2 by default; a 0.4 mm nozzle gains nothing below that) and `--max-triangles`.
 
 ## Printing
 
-- Use white filament. PETG lets more light through than PLA, so its thickness range is wider.
-- Standing panels print with a brim. Shaped and colour panels print lying, flat face down. By default you look at that face, so a smooth or satin sheet gives the cleanest result.
+- Colour panels (the default) and shaped panels print lying, flat face down. By default you look at that face, so a smooth or satin sheet gives the cleanest result. `report.md` says which filament to load first and at which height to change it.
+- Mono panels use white filament and print standing with a brim. PETG lets more light through than PLA, so its thickness range is wider.
 - On the MK4, print PETG on the textured sheet, or use a release agent on the smooth sheet, and keep the filament dry.
 - Print the stand and the lamp base in any opaque colour; they use 0.2 mm layers.
 - Light it from behind with a diffuse, neutral white LED (about 4000 K). By default the flat face looks at you.
@@ -150,7 +147,7 @@ A printer with one extruder changes colour only between layers: the printer stop
 uv run lithophane-forge calibrate --slice
 ```
 
-The strip has twelve steps from 0.6 to 5 mm, printed standing like a lithophane, with each thickness written in thin plastic under its step (it glows when lit). Hold it against your light: the first step that looks black is `--t-max`, about 0.55 × that is `--td`, and the thinnest even step is `--t-min`. `report.md` explains it again next to the files.
+For mono prints. The strip has twelve steps from 0.6 to 5 mm, printed standing like a lithophane, with each thickness written in thin plastic under its step (it glows when lit). Hold it against your light: the first step that looks black is `--t-max`, about 0.55 × that is `--td`, and the thinnest even step is `--t-min`. `report.md` explains it again next to the files.
 
 ## Development
 
