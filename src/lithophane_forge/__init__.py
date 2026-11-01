@@ -20,7 +20,7 @@ class UsageError(Exception):
     pass
 
 
-def _number(kind=float, low: float | None = None):
+def _number(kind=float, low: float | None = None, high: float | None = None):
     def parse(text: str):
         try:
             value = kind(text)
@@ -28,6 +28,8 @@ def _number(kind=float, low: float | None = None):
             raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
         if low is not None and value < low:
             raise argparse.ArgumentTypeError(f"must be at least {low:g} (got {text})")
+        if high is not None and value > high:
+            raise argparse.ArgumentTypeError(f"must be at most {high:g} (got {text})")
         return value
 
     return parse
@@ -78,7 +80,10 @@ def parser() -> argparse.ArgumentParser:
         help="outer height in mm, frame included (default: from the photo)",
     )
     size.add_argument(
-        "--arc", type=_number(float, 10), default=120.0, help="curved: degrees of arc"
+        "--arc",
+        type=_number(float, 10, 300),
+        default=120.0,
+        help="curved: degrees of arc (10 to 300)",
     )
     size.add_argument(
         "--frame", type=_number(float, 0), default=3.0, help="frame width in mm (0: none)"

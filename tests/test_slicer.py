@@ -79,6 +79,32 @@ def test_needs_no_support(made, tmp_path):
     assert slicer.summary(out)["support_lines"] == 0
 
 
+def test_other_nozzle(tmp_path):
+    """Presets for a 0.6 nozzle reach the project (PrusaSlicer does not swap them)."""
+    from conftest import write_photo
+
+    setup = printers.setup(
+        "mk4",
+        "petg",
+        printer_preset="Original Prusa MK4 Input Shaper 0.6 nozzle",
+        print_preset="0.15mm STRUCTURAL @MK4IS 0.6",
+        filament_preset="Prusament PETG @PGIS 0.6",
+    )
+    j = Job(
+        photo=write_photo(tmp_path / "p.png"),
+        setup=setup,
+        optics=DEFAULTS["petg"],
+        out=tmp_path / "out",
+        width=20,
+        pitch=1.0,
+    )
+    res = forge.make(j)
+    with zipfile.ZipFile(res.files["3mf"]) as z:
+        cfg = z.read(threemf.CONFIG).decode()
+    assert "; nozzle_diameter = 0.6" in cfg
+    assert '; filament_settings_id = "Prusament PETG @PGIS 0.6"' in cfg
+
+
 @pytest.mark.parametrize("key", sorted(printers.PRINTERS))
 def test_every_printer_slices(key, tmp_path):
     """The three presets of every printer go together (PrusaSlicer accepts them)."""

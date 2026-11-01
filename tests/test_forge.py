@@ -40,6 +40,19 @@ def test_both_sizes_crop_the_photo(photo, setup, petg, tmp_path, no_slicer):
     assert plan["outer_mm"] == [50, 50]
 
 
+def test_crop_gives_the_panel_its_aspect(photo, setup, petg, tmp_path, no_slicer):
+    """A square crop of a 4:3 photo makes a square picture, cut only once."""
+    res = forge.make(job(photo, setup, petg, tmp_path, width=60, crop=(0, 0, 100, 100)))
+    plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
+    assert plan["outer_mm"] == pytest.approx([60, 60])
+
+
+def test_arc_is_limited(setup, petg, tmp_path):
+    j = Job(photo=tmp_path / "x.png", setup=setup, optics=petg, shape="curved", arc=360)
+    with pytest.raises(ValueError, match="arc"):
+        forge.panel(j, np.ones((5, 5)), 50, 50)
+
+
 def test_grid_gets_coarser_for_big_panels():
     rows, cols, pitch = forge.grid(200, 150, 0.2, 100_000)
     assert pitch > 0.2 and 2 * rows * cols <= 100_000 * 1.05

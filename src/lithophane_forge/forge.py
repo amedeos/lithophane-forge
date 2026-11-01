@@ -16,6 +16,7 @@ from .printers import Setup
 SHAPES = ("flat", "curved")
 VIEWS = ("flat", "relief")
 DEFAULT_WIDTH = 100.0
+MAX_ARC = 300.0  # degrees: a curved panel bent further would almost close (and topple)
 BRIM = 8.0  # mm of brim for a panel printed standing
 BED_MARGIN = 2.0  # keep this far from the bed edge (plus the brim)
 
@@ -139,6 +140,8 @@ def panel(job: Job, t_view: np.ndarray, width: float, height: float) -> mesh.Mes
     if job.shape == "flat":
         return mesh.standing(t, width, height)
     if job.shape == "curved":
+        if not 10 <= job.arc <= MAX_ARC:
+            raise ValueError(f"the arc must be 10 to {MAX_ARC:g} degrees (got {job.arc:g})")
         return mesh.arc(t, width, height, radius=width / math.radians(job.arc))
     raise ValueError(f"unknown shape {job.shape!r}; choose from {', '.join(SHAPES)}")
 
@@ -180,7 +183,7 @@ def object_settings(job: Job, line_width: float = 0.45) -> dict[str, str]:
 def make(job: Job) -> Result:
     res = Result()
     rgb = image.load(job.photo)
-    cropped = image.frame(rgb, rgb.shape[1] / rgb.shape[0], job.crop)
+    cropped = image.crop(rgb, job.crop)  # the panel takes the aspect of the user's crop
     width, height = outer_size(job, cropped.shape[1] / cropped.shape[0])
     rows, cols, pitch = grid(width, height, job.pitch, job.max_triangles)
     res.grid, res.pitch = (rows, cols), pitch
@@ -245,6 +248,7 @@ def slice_project(job: Job, cmd: list[str], project: Path, res: Result) -> dict:
         gcode = Path(tmp) / "probe.gcode"
         slicer.run(cmd, project, gcode, setup.presets(), extra=tuple(dd))
         info = slicer.summary(gcode)
+        slicer.check_presets(info, setup)
         threemf.add_config(project, slicer.config_from_gcode(gcode, setup.binary_gcode))
         if job.slice:
             ext = "bgcode" if setup.binary_gcode else "gcode"

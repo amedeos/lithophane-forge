@@ -18,6 +18,16 @@ def load(path: Path) -> np.ndarray:
     """RGB floats in [0, 1] (sRGB), turned upright from the EXIF orientation, alpha on white."""
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)
+        if im.mode.startswith("I") or im.mode == "F":
+            # 16-bit grey (I;16, or I from older Pillow) and float: convert("RGB") would clip
+            # them at 255 instead of scaling them
+            grey = np.asarray(im, dtype=np.float64)
+            top = grey.max(initial=0)
+            if im.mode.startswith("I;16") or top > 255:
+                grey /= 65535
+            elif im.mode != "F" or top > 1:
+                grey /= 255
+            return np.repeat(np.clip(grey, 0, 1)[..., None], 3, axis=2)
         if im.mode in ("RGBA", "LA", "P"):
             im = im.convert("RGBA")
             white = Image.new("RGBA", im.size, (255, 255, 255, 255))
@@ -60,16 +70,23 @@ def parse_crop(text: str) -> tuple[int, int, int, int]:
     return parts[0], parts[1], parts[2], parts[3]
 
 
+def crop(rgb: np.ndarray, box: tuple[int, int, int, int] | None) -> np.ndarray:
+    """The user's crop (X, Y, W, H in photo pixels), or the whole photo."""
+    if not box:
+        return rgb
+    x, y, w, h = box
+    rgb = rgb[max(y, 0) : y + h, max(x, 0) : x + w]
+    if rgb.size == 0:
+        raise ValueError("the crop lies outside the photo")
+    return rgb
+
+
 def frame(
-    rgb: np.ndarray, aspect: float, crop: tuple[int, int, int, int] | None = None
+    rgb: np.ndarray, aspect: float, box: tuple[int, int, int, int] | None = None
 ) -> np.ndarray:
     """Crop the photo to `aspect` (width / height): first the user's crop, then the
     largest centred window with that aspect."""
-    if crop:
-        x, y, w, h = crop
-        rgb = rgb[max(y, 0) : y + h, max(x, 0) : x + w]
-        if rgb.size == 0:
-            raise ValueError("the crop lies outside the photo")
+    rgb = crop(rgb, box)
     h, w = rgb.shape[:2]
     if w / h > aspect:
         nw = max(1, round(h * aspect))
@@ -107,11 +124,11 @@ def light_map(rgb: np.ndarray, tone: Tone | None = None) -> np.ndarray:
         from skimage import exposure
 
         lstar = exposure.equalize_adapthist(lstar, clip_limit=tone.clahe)
+    if tone.invert:
+        lstar = 1 - lstar  # a negative in lightness: mid-grey stays mid-grey
     light = lstar_to_y(lstar * 100)
     if tone.gamma != 1.0:
         light = light**tone.gamma
-    if tone.invert:
-        light = 1 - light
     return np.clip(light, 0, 1)
 
 
