@@ -13,9 +13,9 @@ Guidance for coding agents working in this repository.
 
 ## Language
 
-- Write all repository text in **English at B2/C1 level**: README, docstrings, comments. Use clear, short sentences and common words.
+- **Always** write in **English at B2/C1 level** everything that goes into the repository or to GitHub: README, AGENTS.md, docstrings, comments, help and error messages, test names, commit messages, pull request titles and descriptions. Use clear, short sentences and common words.
 - In Markdown, write each paragraph and each list item on **one line** (no hard wraps).
-- The owner chats in Italian.
+- The owner chats in Italian: answer the owner in Italian, but keep everything above in English.
 
 ## Environment and commands
 
@@ -103,4 +103,8 @@ uv run lithophane-forge printers
 
 ## Git
 
-Work on `feature/*` branches and merge them into `main` by pull request; CI (`.github/workflows/ci.yml`) must be green. Do not commit or push unless the owner asks. In commit messages, the co-author line is `Co-Authored-By: Claude Opus <noreply@anthropic.com>`, without a version number.
+- **Always** use a feature branch (`feature/<topic>`, from an up-to-date `main`) for every change, small fixes and documentation included. Never commit to `main` directly.
+- Merge into `main` by pull request, with a merge commit (not squash), when CI (`.github/workflows/ci.yml`) is green.
+- Stacked pull requests: after merging one, retarget the next to `main` (`gh pr edit N --base main`) before you delete the merged branch. Deleting the base branch of an open pull request closes it.
+- Do not commit or push unless the owner asks.
+- In commit messages, the co-author line is `Co-Authored-By: Claude Opus <noreply@anthropic.com>`, without a version number.
