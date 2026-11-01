@@ -2,7 +2,7 @@
 
 The strip prints standing, with the same settings as a lithophane, so the light goes
 through the same structure of walls and infill. Under every step its thickness is
-written in thin plastic inside the thick label band: lit from behind, the numbers glow.
+written in thin plastic inside a darker, 2 mm label band: lit from behind, the numbers glow.
 
 Hold the strip against the light you will use and read:
 - t_max: the first step that looks black (thicker steps look the same);
@@ -25,7 +25,10 @@ STEP_W = 10.0  # mm per step
 STEP_H = 20.0  # mm of plain plastic per step
 LABEL_H = 8.0  # mm of label band under the steps
 FRAME = 3.0
-FRAME_T = round(STEPS[-1] + 0.8, 2)  # the frame and the label band: thicker than any step
+FRAME_T = round(STEPS[-1] + 0.8, 2)
+# the label band: 0.8 mm glyphs in it let about 3x more light through, and its pockets are
+# shallow enough to print without support (PrusaSlicer's support probe in test_slicer.py)
+BAND_T = 2.0
 
 
 def labels(texts: list[str], cols: int, rows: int) -> np.ndarray:
@@ -44,7 +47,12 @@ def labels(texts: list[str], cols: int, rows: int) -> np.ndarray:
 
 
 def wedge(job: Job) -> tuple[np.ndarray, Layout]:
-    """The thickness map (as the viewer sees it) and its layout."""
+    """The thickness map (as the viewer sees it) and its layout, ready to print standing.
+
+    The overhang limit comes before the labels: every glyph is a narrow pocket in the label
+    band, and the limit would fill it. The band is only BAND_T thick, so the pockets are
+    shallow: their tops are short bridges and the counters (inside an 8 or a 4) print
+    without support."""
     width = len(STEPS) * STEP_W + 2 * FRAME
     height = STEP_H + LABEL_H + 2 * FRAME
     rows, cols, pitch = forge.grid(width, height, job.pitch, job.max_triangles)
@@ -57,6 +65,9 @@ def wedge(job: Job) -> tuple[np.ndarray, Layout]:
     steps = (v <= height - FRAME) & (v >= FRAME + LABEL_H)
     for k, thick in enumerate(STEPS):
         t[np.ix_(steps, inside_u & (step == k))] = thick
+    label_area = (v < FRAME + LABEL_H) & (v >= FRAME)
+    t[np.ix_(label_area, inside_u)] = BAND_T
+    t = forge.limit_overhangs(t, job.max_overhang, height / (rows - 1))
     band = (v < FRAME + LABEL_H - 1) & (v > FRAME + 1)
     ri, ci = int(band.sum()), int(inside_u.sum())
     mask = labels([f"{s:g}" for s in STEPS], ci, ri)
@@ -78,7 +89,6 @@ def make(job: Job) -> Result:
         stand=False,
     )
     t, lay = wedge(job)
-    t = forge.limit_overhangs(t, job.max_overhang, lay.height / (lay.rows - 1))
     res = Result(layout=lay)
     parts = forge.place(forge.volumes(job, lay, t), job.setup.bed, forge.BRIM)
     whole = mesh.merge([m for _, m in parts])

@@ -93,6 +93,17 @@ class Job:
             lo, hi = self.color_range
             if not 0.3 <= lo < hi:
                 raise ValueError(f"colour thickness range {lo}..{hi} mm is not valid")
+            from .palette import heights
+
+            n = len(heights(lo, hi, self.setup.first_layer, self.setup.layer))
+            if n < max(self.colors, 2):
+                raise ValueError(
+                    f"the colour range {lo:g} to {hi:g} mm holds {n} layer tops of "
+                    f"{self.setup.layer:g} mm; {self.colors} colours need at least "
+                    f"{max(self.colors, 2)}: widen --t-min/--t-max"
+                )
+            if self.tone.invert or self.tone.clahe > 0:
+                raise ValueError("--invert and --clahe work in mono mode only")
         if self.hole and self.shape not in ("flat", "shaped"):
             raise ValueError("--hole works with the flat and shaped panels")
         if self.stand and self.shape != "flat":
@@ -511,6 +522,11 @@ def colour_notes(job: Job, plan) -> list[str]:
             "and this photo's colours do not lie on one path; see preview.png, or try "
             "--colors with one more filament"
         )
+    if len(plan.real.filaments) < job.colors:
+        notes.append(
+            f"{len(plan.real.filaments)} filaments are enough for this photo (you asked for "
+            f"{job.colors}): more changes would not bring it closer"
+        )
     if job.setup.material != "petg" and job.filaments is None:
         notes.append(
             "the suggested filaments come from the Prusament PETG table; pass "
@@ -581,7 +597,7 @@ def colour_plan(res: Result) -> dict | None:
         "ideal": fit(p.ideal),
         "print": fit(p.real),
         "source": p.source,
-        "suggestions": [
+        "closest": [  # per ideal colour: the closest filament by colour alone
             {"ideal": i.hex, "filament": f.name, "hex": f.hex, "delta_e": round(d, 1)}
             for i, (f, d) in zip(p.ideal.filaments, p.matches)
         ],
@@ -607,7 +623,8 @@ def write_plan(job: Job, res: Result) -> None:
         "max_overhang_deg": job.max_overhang if job.standing else None,
         "grid": [lay.rows, lay.cols],
         "pitch_mm": round(lay.pitch, 4),
-        "optics": asdict(job.optics),
+        "optics": asdict(job.optics) if job.mode == "mono" else None,
+        "color_range_mm": list(job.color_range) if job.mode == "color" else None,
         "tone": asdict(job.tone),
         "printer": {
             "key": s.printer.key,
@@ -644,13 +661,19 @@ def colour_report(job: Job, res: Result) -> list[str]:
     lines += [
         (
             f"- With these filaments the print is a mean Delta E {p.real.mean_de:.1f} away from "
-            f"the photo (95 % of it within {p.real.p95_de:.0f}); the ideal colours would give "
-            f"{p.ideal.mean_de:.1f}."
+            f"the photo (95 % of it within {p.real.p95_de:.0f}); the ideal colours, fitted to "
+            f"the photo alone, give {p.ideal.mean_de:.1f}."
         ),
         "",
-        "## Ideal colours and suggested filaments",
+        "## Ideal colours",
         "",
-        "| # | Ideal colour | Ideal TD (mm) | Suggested filament | Delta E |",
+        (
+            "The colours that suit this photo best, whatever filaments exist, and the closest "
+            "filament to each. The print above uses the filaments that bring the whole "
+            "picture closest to the photo, which can differ from the closest colours."
+        ),
+        "",
+        "| # | Ideal colour | Ideal TD (mm) | Closest filament | Delta E |",
         "|---|---|---|---|---|",
     ]
     for k, (i, (f, d)) in enumerate(zip(p.ideal.filaments, p.matches), start=1):
@@ -667,7 +690,8 @@ def colour_report(job: Job, res: Result) -> list[str]:
 
 
 def report(job: Job, res: Result) -> str:
-    s, o, lay = job.setup, job.optics, res.layout
+    s, lay = job.setup, res.layout
+    t_min, t_max = job.color_range if job.mode == "color" else (job.optics.t_min, job.optics.t_max)
     what = {
         "flat": "flat panel",
         "curved": f"curved panel ({job.arc:g}° arc)",
@@ -679,8 +703,8 @@ def report(job: Job, res: Result) -> str:
         "",
         (
             f"Lithophane from `{job.photo.name}`: {what[job.shape]}, {lay.width:.1f} x "
-            f"{lay.height:.1f} mm (frame {job.frame:g} mm), thickness {o.t_min:g} to "
-            f"{o.t_max:g} mm."
+            f"{lay.height:.1f} mm (frame {job.frame:g} mm), thickness {t_min:g} to "
+            f"{t_max:g} mm."
         ),
         "",
         "## Print",

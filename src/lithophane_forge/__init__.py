@@ -351,7 +351,8 @@ def cmd_analyze(args) -> int:
             raise UsageError(str(e)) from None
         source = str(args.filaments) if args.filaments else "Prusament PETG (Prusa's TD table)"
         plan = palette.plan(palette.target(small), args.colors, h, choices, source)
-        print(f"colour print with {args.colors} filaments ({s.printer.title} layers):")
+        n = len(plan.real.filaments)
+        print(f"colour print with {n} of {args.colors} filaments ({s.printer.title} layers):")
         print_colour(plan, plan.real.colour_changes(s.layer))
     return 0
 
@@ -364,7 +365,10 @@ def cmd_calibrate(args) -> int:
     except ValueError as e:
         raise UsageError(str(e)) from None
     job = calibrate.default_job(setup, optics.DEFAULTS[args.material], args.out, slice_=args.slice)
-    res = calibrate.make(job)
+    try:
+        res = calibrate.make(job)
+    except ValueError as e:  # for example PrusaSlicer took other presets
+        raise UsageError(str(e)) from None
     sx, sy, sz = res.size
     print(
         f"{job.stem}: {sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, steps "

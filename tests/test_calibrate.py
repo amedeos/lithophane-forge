@@ -11,9 +11,22 @@ def test_wedge_has_every_step(setup, petg, tmp_path):
     assert lay.width == pytest.approx(len(calibrate.STEPS) * calibrate.STEP_W + 6)
     found = set(np.round(np.unique(t), 3))
     assert set(calibrate.STEPS) <= found
-    # the labels: thin plastic inside the thick band under the steps
+    # the labels: thin plastic inside the thicker band under the steps
     band = t[-int(calibrate.LABEL_H / lay.pitch) : -int(calibrate.FRAME / lay.pitch)]
-    assert (band <= 0.8 + 1e-9).any() and (band > 5).any()
+    assert (band <= 0.8 + 1e-9).any() and np.isclose(band, calibrate.BAND_T).any()
+
+
+def test_labels_survive_the_overhang_limit(setup, petg, tmp_path):
+    """Every glyph stays thin plastic in the printed strip (the limit used to fill them)."""
+    job = calibrate.default_job(setup, petg, tmp_path)
+    t, lay = calibrate.wedge(job)
+    v = np.linspace(lay.height, 0, lay.rows)
+    band = (v < calibrate.FRAME + calibrate.LABEL_H - 1) & (v > calibrate.FRAME + 1)
+    u = np.linspace(0, lay.width, lay.cols)
+    inside = (u >= calibrate.FRAME) & (u <= lay.width - calibrate.FRAME)
+    mask = calibrate.labels([f"{s:g}" for s in calibrate.STEPS], int(inside.sum()), band.sum())
+    glyphs = t[np.ix_(band, inside)] < 1
+    assert glyphs.sum() == mask.sum() > 500
 
 
 def test_labels_fit_their_cells():

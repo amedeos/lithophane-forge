@@ -58,7 +58,7 @@ def test_stack_gets_darker_with_height(heights):
 def test_plan_fits_a_sunset(heights):
     t = P.target(sunset())
     plan = P.plan(t, 4, heights, P.load_filaments(), "catalog")
-    assert plan.ideal.mean_de <= plan.real.mean_de + 0.5  # the ideal is at least as good
+    assert plan.ideal.mean_de < plan.real.mean_de  # free colours fit this photo better
     assert plan.real.mean_de < 10
     assert P.is_base(plan.real.filaments[0])  # a white or natural base
     starts = plan.real.starts
@@ -84,10 +84,28 @@ def test_ideal_colours_do_not_depend_on_the_list(heights):
     t = P.target(sunset())
     a = P.plan(t, 3, heights, P.load_filaments(), "catalog")
     b = P.plan(t, 3, heights, P.load_filaments(EXAMPLE), "shelf")
-    assert [f.hex for f in a.ideal.filaments] == [f.hex for f in b.ideal.filaments] or (
-        abs(a.ideal.mean_de - b.ideal.mean_de) < 1.0
-    )
+    assert [(f.hex, f.td) for f in a.ideal.filaments] == [(f.hex, f.td) for f in b.ideal.filaments]
+    assert np.array_equal(a.ideal.starts, b.ideal.starts)
     assert {f.name for f in b.real.filaments} <= {f.name for f in P.load_filaments(EXAMPLE)}
+
+
+@pytest.mark.parametrize("k", [5, 6, 8])
+def test_every_change_is_inside_the_print(heights, k):
+    """No filament starts at the top layer: its M600 would be above the print."""
+    plan = P.plan(P.target(sunset()), k, heights, P.load_filaments(), "catalog")
+    for fit in (plan.ideal, plan.real):
+        assert len(fit.filaments) <= k and np.all(np.diff(fit.starts) > 0)
+        assert all(z <= heights[-1] + 1e-9 for z, _ in fit.colour_changes(0.1))
+    assert len(plan.matches) == len(plan.ideal.filaments)
+
+
+def test_more_colours_do_not_collapse(heights):
+    """Changing one filament at a time can end on white and black only; the k-means start
+    keeps more colours from doing worse than that."""
+    t = P.target(sunset())
+    four = P.plan(t, 4, heights, P.load_filaments(), "catalog").real.mean_de
+    six = P.plan(t, 6, heights, P.load_filaments(), "catalog").real.mean_de
+    assert six < 6 and six < four + 2
 
 
 def test_load_filaments(tmp_path):

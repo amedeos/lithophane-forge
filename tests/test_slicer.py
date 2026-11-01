@@ -189,3 +189,24 @@ def test_calibration_slices(tmp_path):
     )
     res = calibrate.make(job)
     assert float(res.sliced["calibration"]["filament_g"]) > 5
+
+
+def test_calibration_needs_no_support(tmp_path):
+    """The label glyphs are narrow pockets: their tops are bridges, not overhangs."""
+    from lithophane_forge import calibrate
+
+    setup = printers.setup("mk4", "petg")
+    job = calibrate.default_job(setup, DEFAULTS["petg"], tmp_path)
+    res = calibrate.make(job)
+    out = tmp_path / "support.gcode"
+    threshold = 90 - job.max_overhang - 5
+    extra = (
+        "--support-material",
+        "--support-material-auto",
+        "--dont-support-bridges",
+        "--support-material-threshold",
+        f"{threshold:g}",
+    )
+    with slicer.datadir(setup, profiles.find_bundle(), slicer.command()) as dd:
+        slicer.run(slicer.command(), res.files["3mf"], out, extra=(*dd, *extra))
+    assert slicer.summary(out)["support_lines"] == 0

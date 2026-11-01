@@ -10,9 +10,12 @@ best:
 1. The ideal colours: k-means in CIELAB gives a start; then an optimiser moves the colours
    and the change heights to bring the path as close as it can to the photo's pixels.
    These colours do not depend on any filament you own.
-2. The suggestion: the closest real filament to each ideal colour (Prusament PETG, from
-   Prusa's published hex and TD values, or your own list with --filaments).
-3. The print: the change heights fitted again for those real filaments.
+2. The real filaments (Prusament PETG, from Prusa's published hex and TD values, or your
+   own list with --filaments): the ones that bring the whole print closest to the photo,
+   searched from the ideal colours and from the k-means colours. The closest filament to
+   each ideal colour is also reported.
+3. The print: the change heights fitted again for those real filaments, on layer tops;
+   filaments that no point holds are dropped.
 
 Light model (Beer-Lambert, per channel): a filament with linear colour c and transmission
 distance td lets through exp(-t * a) per channel, with a = ln(10) / td * ln(c) / ln(Y(c)).
@@ -249,20 +252,29 @@ class Fitter:
         return self._starts(best)
 
     def choose(
-        self, ideal: list[Filament], starts: np.ndarray, choices: list[Filament], rounds: int = 2
+        self,
+        targets: list[tuple[list[Filament], np.ndarray]],
+        choices: list[Filament],
+        rounds: int = 2,
     ) -> tuple[list[Filament], np.ndarray]:
-        """Real filaments for the ideal ones: start from the closest colours, then change
-        one position at a time to the filament that makes the whole print closest to the
-        photo, and fit the heights again. The base comes from the light, neutral,
-        translucent filaments, if the list has any."""
+        """Real filaments for target colours (with their change heights): start from the
+        closest colours, then change one position at a time to the filament that makes the
+        whole print closest to the photo, and fit the heights again. That can get stuck
+        (a dark filament low in the stack hides every change above it), so it runs once per
+        target and keeps the best. The base comes from the light, neutral, translucent
+        filaments, if the list has any."""
         bases = [c for c in choices if is_base(c)] or choices
-        options = [bases] + [choices] * (len(ideal) - 1)
-        picked = [nearest(f.linear, opts)[0] for f, opts in zip(ideal, options)]
-        for _ in range(rounds):
-            for i, opts in enumerate(options):
-                costs = [self.cost_of(picked[:i] + [c] + picked[i + 1 :], starts) for c in opts]
-                picked[i] = opts[int(np.argmin(costs))]
-            starts = self.heights_for(picked, starts)
+        found = []
+        for wanted, starts in targets:
+            options = [bases] + [choices] * (len(wanted) - 1)
+            picked = [nearest(f.linear, opts)[0] for f, opts in zip(wanted, options)]
+            for _ in range(rounds):
+                for i, opts in enumerate(options):
+                    costs = [self.cost_of(picked[:i] + [c] + picked[i + 1 :], starts) for c in opts]
+                    picked[i] = opts[int(np.argmin(costs))]
+                starts = self.heights_for(picked, starts)
+            found.append((self.cost_of(picked, starts), picked, starts))
+        _, picked, starts = min(found, key=lambda f: f[0])
         return picked, starts
 
 
@@ -362,7 +374,7 @@ class Plan:
 
     ideal: Fit
     real: Fit
-    matches: list[tuple[Filament, float]]  # per ideal colour: suggested filament, Delta E
+    matches: list[tuple[Filament, float]]  # per ideal colour: closest filament, Delta E
     source: str  # where the real filaments come from
 
 
@@ -372,10 +384,31 @@ def _merge(filaments: list[Filament], starts: np.ndarray):
     return [filaments[i] for i in keep], starts[keep]
 
 
+def _used(starts: np.ndarray, h: np.ndarray) -> list[int]:
+    """The filaments some point of the print holds. A filament that starts at the top layer
+    (snapping can put it there) would only get an M600 above the print, and one that the
+    next filament replaces at the same height has no layer at all."""
+    idx = [0] + [i for i in range(1, len(starts)) if starts[i] < h[-1] - 1e-9]
+    return [
+        i for j, i in enumerate(idx) if j + 1 == len(idx) or starts[idx[j + 1]] > starts[i] + 1e-9
+    ]
+
+
+def _on_layers(filaments: list[Filament], starts: np.ndarray, h: np.ndarray):
+    """Changes snapped to layer tops, without the filaments that no point holds."""
+    starts = np.concatenate([[0.0], _snap(starts[1:], h)])
+    keep = _used(starts, h)
+    return [filaments[i] for i in keep], starts[keep], keep
+
+
 def plan(
     target_lab: np.ndarray, k: int, h: np.ndarray, choices: list[Filament], source: str
 ) -> Plan:
-    """Ideal colours for the photo, the closest real filaments, and their change heights."""
+    """Ideal colours for the photo, the closest real filaments, and their change heights.
+
+    The ideal colours come from the photo alone: `choices` is used only after them, to
+    pick the real filaments. Fewer than k filaments may come back when the photo does not
+    need them all."""
     fitter = Fitter(target_lab, h)
     span = h[-1] - h[0]
     even = np.concatenate([[0.0], h[0] + span * np.arange(1, k) / k])
@@ -383,35 +416,32 @@ def plan(
     def cost(lin, td, starts):
         return fitter.cost(attenuation(lin, td), starts)
 
-    best = None
+    def as_filaments(lin, td):
+        return [
+            Filament(f"ideal {i + 1}", linear_to_hex(c), float(t))
+            for i, (c, t) in enumerate(zip(lin, td))
+        ]
+
+    best, kmeans = None, []
     for seed in (0, 1):
         lin0 = np.clip(lab_to_linear(kmeans_lab(fitter.sample, k, seed)), 0.01, 0.99)
+        kmeans.append((as_filaments(lin0, ideal_td(lin0)), even))
         found = fitter.ideal(lin0, ideal_td(lin0), even)
         if best is None or cost(*found) < cost(*best):
             best = found
     lin, td, starts = best
-    as_filaments = [
-        Filament(f"ideal {i + 1}", linear_to_hex(c), float(t))
-        for i, (c, t) in enumerate(zip(lin, td))
-    ]
-    picked, real_starts = fitter.choose(as_filaments, starts, choices)
-    # the ideal must be at least as good as the real filaments: start once more from them
-    lin_r = np.array([f.linear for f in picked])
-    again = fitter.ideal(lin_r, np.array([f.td for f in picked]), real_starts)
-    if cost(*again) < cost(lin, td, starts):
-        lin, td, starts = again
-    starts = np.concatenate([[0.0], _snap(starts[1:], h)])
+    # the real filaments: from the ideal colours, and from the photo's own (k-means) colours
+    picked, real_starts = fitter.choose([(as_filaments(lin, td), starts), *kmeans], choices)
     ideal = [
         Filament(f"ideal {i + 1}", linear_to_hex(c), round(float(t), 2))
         for i, (c, t) in enumerate(zip(lin, td))
     ]
-    ideal_fit = evaluate(ideal, starts, h, target_lab)
-    matches = [
-        (f, float(delta_e2000(lab(i.linear)[None], lab(f.linear)[None])[0]))
-        for i, f in zip(ideal, picked)
-    ]
+    ideal, starts, _ = _on_layers(ideal, starts, h)
+    matches = [nearest(f.linear, choices) for f in ideal]
     real, real_starts = _merge(picked, real_starts)
-    real_starts = np.concatenate([[0.0], _snap(real_starts[1:], h)])
+    real, real_starts, _ = _on_layers(real, real_starts, h)
+    real, real_starts = _merge(real, real_starts)
+    ideal_fit = evaluate(ideal, starts, h, target_lab)
     return Plan(ideal_fit, evaluate(real, real_starts, h, target_lab), matches, source)
 
 
