@@ -38,6 +38,7 @@ class Job:
     mode: str = "mono"  # "color": filament changes (M600), printed lying
     colors: int = 4  # colour mode: number of filaments
     filaments: Path | None = None  # colour mode: your own filaments instead of the catalog
+    allow_abrasive: bool = False  # colour mode: also suggest abrasive filaments
     color_range: tuple[float, float] = COLOR_RANGE
     width: float | None = None  # outer size in mm, frame included
     height: float | None = None
@@ -255,8 +256,7 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     target = palette.target(image.resize(photo, ri, ci), job.tone.levels, job.tone.gamma)
     lo, hi = job.color_range
     h = palette.heights(lo, hi, job.setup.first_layer, job.setup.layer)
-    choices = palette.load_filaments(job.filaments)
-    source = str(job.filaments) if job.filaments else "Prusament PETG (Prusa's TD table)"
+    choices, source = palette.choices(job.filaments, job.allow_abrasive)
     plan = palette.plan(target, job.colors, h, choices, source)
     real_idx = median_filter(palette.assign(target, palette.lab(plan.real.colours)), size=3)
     ideal_idx = palette.assign(target, palette.lab(plan.ideal.colours))

@@ -79,6 +79,7 @@ class Filament:
     name: str
     hex: str
     td: float  # mm that let through about 10 % of the light
+    abrasive: bool = False  # needs a hardened steel nozzle (for example tungsten-filled)
 
     @property
     def linear(self) -> np.ndarray:
@@ -334,7 +335,8 @@ def assign(target_lab: np.ndarray, curve_lab: np.ndarray) -> np.ndarray:
 
 
 def load_filaments(path: Path | None = None) -> list[Filament]:
-    """The catalog (Prusament PETG) or a TOML file with [[filament]] name, hex, td."""
+    """The catalog (Prusament PETG) or a TOML file with [[filament]] name, hex, td, and
+    optionally abrasive = true."""
     if path is None:
         text = (
             resources.files("lithophane_forge")
@@ -347,9 +349,12 @@ def load_filaments(path: Path | None = None) -> list[Filament]:
     out = []
     for row in rows:
         try:
-            f = Filament(str(row["name"]), str(row["hex"]), float(row["td"]))
+            abrasive = row.get("abrasive", False)
+            if not isinstance(abrasive, bool):
+                raise TypeError("abrasive must be true or false")
+            f = Filament(str(row["name"]), str(row["hex"]), float(row["td"]), abrasive)
             hex_to_linear(f.hex)
-        except (KeyError, ValueError) as e:
+        except (KeyError, ValueError, TypeError) as e:
             raise ValueError(f"bad filament entry {row!r}: {e}") from None
         if f.td <= 0:
             raise ValueError(f"{f.name}: td must be positive")
@@ -357,6 +362,33 @@ def load_filaments(path: Path | None = None) -> list[Filament]:
     if not out:
         raise ValueError("no filaments in the list")
     return out
+
+
+CATALOG = "Prusament PETG (Prusa's TD table)"
+
+
+def choices(path: Path | None = None, allow_abrasive: bool = False) -> tuple[list[Filament], str]:
+    """The filaments to pick from (the catalog or your list), and where they come from.
+
+    Abrasive filaments need a hardened steel nozzle, and most printers come with brass:
+    they are left out unless allow_abrasive."""
+    found = load_filaments(path)
+    source = str(path) if path else CATALOG
+    if allow_abrasive:
+        return found, source
+    kept = [f for f in found if not f.abrasive]
+    if not kept:
+        raise ValueError(
+            "every filament in the list is abrasive; pass --allow-abrasive if your nozzle "
+            "is hardened steel"
+        )
+    left_out = [f.name for f in found if f.abrasive]
+    if left_out:
+        source += (
+            f"; left out as abrasive (they need a hardened steel nozzle, --allow-abrasive "
+            f"uses them): {', '.join(left_out)}"
+        )
+    return kept, source
 
 
 def nearest(colour_lin: np.ndarray, choices: list[Filament]) -> tuple[Filament, float]:

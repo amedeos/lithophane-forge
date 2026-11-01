@@ -82,6 +82,14 @@ def test_bad_option_exits_with_2(argv):
     assert e.value.code == 2
 
 
+def test_allow_abrasive_reaches_the_job(photo, tmp_path):
+    from lithophane_forge import job_from, parser
+
+    args = parser().parse_args(["make", str(photo), "--mode", "color", "--allow-abrasive"])
+    assert job_from(args).allow_abrasive
+    assert not job_from(parser().parse_args(["make", str(photo)])).allow_abrasive
+
+
 def test_calibrate_errors_exit_with_2(monkeypatch, capsys, tmp_path):
     from lithophane_forge import calibrate
 

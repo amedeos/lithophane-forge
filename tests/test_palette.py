@@ -108,6 +108,23 @@ def test_more_colours_do_not_collapse(heights):
     assert six < 6 and six < four + 2
 
 
+def test_abrasive_filaments_are_left_out(tmp_path):
+    """Tungsten 75 % needs a hardened steel nozzle: only --allow-abrasive suggests it."""
+    tungsten = "Prusament PETG Tungsten 75%"
+    assert next(f for f in P.load_filaments() if f.name == tungsten).abrasive
+    kept, source = P.choices()
+    assert tungsten not in {f.name for f in kept} and "left out as abrasive" in source
+    every, source = P.choices(allow_abrasive=True)
+    assert tungsten in {f.name for f in every} and source == P.CATALOG
+    own = tmp_path / "own.toml"
+    own.write_text('[[filament]]\nname = "w"\nhex = "#808080"\ntd = 1\nabrasive = true\n')
+    with pytest.raises(ValueError, match="allow-abrasive"):
+        P.choices(own)
+    own.write_text('[[filament]]\nname = "w"\nhex = "#808080"\ntd = 1\nabrasive = "yes"\n')
+    with pytest.raises(ValueError, match="true or false"):
+        P.load_filaments(own)
+
+
 def test_load_filaments(tmp_path):
     assert len(P.load_filaments()) >= 20
     assert any(f.name == "Prusament PETG Signal White" for f in P.load_filaments())

@@ -54,7 +54,7 @@ uv run lithophane-forge printers
 | `slicer.py` | PrusaSlicer CLI: temporary `--datadir`, slice, summary, config from G-code |
 | `render.py` | Simulated backlit view, relief hillshade, simulated colour print, palette strip, preview sheet, thumbnail |
 | `palette.py` | Colour mode: light model of a stack (per-channel Beer-Lambert from hex and td), `Fitter` (ideal colours, td and change heights with Powell; `choose` picks real filaments by their effect on the whole print), `plan()`, `assign()`, CIELAB helpers |
-| `data/petg_catalog.toml` | Prusament PETG hex and TD values from Prusa's HueForge table (source URL inside) |
+| `data/petg_catalog.toml` | Prusament PETG hex and TD values from Prusa's HueForge table (source URL inside). `abrasive = true` marks filaments that need a hardened steel nozzle (Tungsten 75 %); `palette.choices` leaves them out unless `--allow-abrasive` |
 | `calibrate.py` | The calibration strip: steps of known thickness with glowing labels (0.8 mm glyphs in a 2 mm band, stamped after the overhang limit), same settings as a lithophane |
 | `examples/filaments.toml` | Example `--filaments` list: the owner's shelf from 3d-linux, td estimated |
 | `tests/` | pytest suite. Keep it green. `slicer`-marked tests need PrusaSlicer |
