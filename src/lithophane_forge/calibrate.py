@@ -119,7 +119,7 @@ def make(job: Job) -> Result:
     if cmd is None:
         res.notes.append(
             "PrusaSlicer not found: the 3MF has the model and its settings but "
-            "not the printer presets"
+            "not the printer presets or the filament colour"
         )
     else:
         res.sliced["calibration"] = forge.slice_project(

@@ -507,7 +507,7 @@ def make(job: Job) -> Result:
     if cmd is None:
         res.notes.append(
             "PrusaSlicer not found: the 3MF has the model and its settings but "
-            "not the printer presets; pick them in PrusaSlicer"
+            "not the printer presets or the filament colour; pick them in PrusaSlicer"
         )
     else:
         for name, path in projects.items():
@@ -561,14 +561,20 @@ def relief_panel(job: Job, t_view: np.ndarray, pitch: float, mask=None):
     return "relief side (front)", render.relief(t_view, pitch, mask)
 
 
+PLAIN_WHITE = "#FFFFFF"  # white filament with no catalog colour (PLA)
+
+
 def first_colour(job: Job, res: Result) -> str:
     """The colour of the filament the print starts with: the first filament of the colour
-    plan, or white PETG. The Prusament presets all say orange (#FF8000)."""
+    plan; for white prints Signal White for PETG (from the catalog), plain white for PLA.
+    The filament presets in the printer table all say orange (#FF8000)."""
     if res.colour is not None:
         return res.colour.real.filaments[0].hex
-    from .palette import WHITE_HEX
+    if job.setup.material == "petg":
+        from .palette import white
 
-    return WHITE_HEX
+        return white().hex
+    return PLAIN_WHITE
 
 
 def slice_project(
@@ -583,7 +589,7 @@ def slice_project(
         slicer.datadir(setup, profiles.find_bundle(), cmd) as dd,
     ):
         gcode = Path(tmp) / "probe.gcode"
-        own = ("--filament-colour", colour) if colour else ()
+        own = ("--filament-colour", colour) if colour is not None else ()
         slicer.run(cmd, project, gcode, setup.presets(), extra=(*dd, *own))
         info = slicer.summary(gcode)
         slicer.check_presets(info, setup)
@@ -650,7 +656,8 @@ def write_plan(job: Job, res: Result) -> None:
             "printer": s.printer_preset,
             "print": s.print_preset,
             "filament": s.filament_preset,
-            "filament_colour": first_colour(job, res),
+            # the colour the project carries: only PrusaSlicer writes it into the 3MF
+            "filament_colour": first_colour(job, res) if "lithophane" in res.sliced else None,
             "material": s.material,
             "layer_mm": s.layer,
         },

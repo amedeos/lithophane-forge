@@ -23,8 +23,11 @@ For a grey, a is the same on every channel and t = td lets 10 % through; a colou
 filament lets its own colour through more than the others.
 """
 
+import math
+import re
 import tomllib
 from dataclasses import dataclass, field
+from functools import cache
 from importlib import resources
 from pathlib import Path
 
@@ -33,8 +36,8 @@ import numpy as np
 from .image import linear_to_srgb, srgb_to_linear
 
 LN10 = np.log(10)
-WHITE_TD = 3.4  # Prusament PETG Signal White: the reference for "fully bright"
-WHITE_HEX = "#E5E0E1"  # the same white: the filament colour of mono prints in the project
+WHITE = "Prusament PETG Signal White"  # the reference for "fully bright" (see white())
+HEX = re.compile(r"#?[0-9A-Fa-f]{6}")
 D65 = np.array([0.95047, 1.0, 1.08883])
 M_XYZ = np.array(
     [
@@ -100,7 +103,7 @@ def ideal_td(lin: np.ndarray) -> np.ndarray:
     Fitted by eye to Prusa's PETG table: black about 0.3 mm, mid tones about 1-2.5 mm,
     white 3.4 mm."""
     lstar = lab(lin)[..., 0]
-    return np.interp(lstar, [15, 35, 55, 75, 95], [0.3, 0.6, 1.5, 2.6, WHITE_TD])
+    return np.interp(lstar, [15, 35, 55, 75, 95], [0.3, 0.6, 1.5, 2.6, white().td])
 
 
 def heights(t_min: float, t_max: float, first: float, layer: float) -> np.ndarray:
@@ -139,7 +142,7 @@ class Fit:
 
 def _exposure(h_min: float) -> float:
     """The viewer's white: light through the thinnest stack of white PETG."""
-    return float(np.exp(-h_min * LN10 / WHITE_TD))
+    return float(np.exp(-h_min * LN10 / white().td))
 
 
 def _curve(att, starts, h, white) -> np.ndarray:
@@ -353,16 +356,27 @@ def load_filaments(path: Path | None = None) -> list[Filament]:
             abrasive = row.get("abrasive", False)
             if not isinstance(abrasive, bool):
                 raise TypeError("abrasive must be true or false")
-            f = Filament(str(row["name"]), str(row["hex"]), float(row["td"]), abrasive)
-            hex_to_linear(f.hex)
+            colour = str(row["hex"]).strip()
+            if not HEX.fullmatch(colour):
+                raise ValueError(f"hex must be #RRGGBB (got {colour!r})")
+            # one spelling everywhere: the preview, the M600 list and PrusaSlicer read it
+            colour = "#" + colour.lstrip("#").upper()
+            td = float(row["td"])
+            if not (math.isfinite(td) and td > 0):
+                raise ValueError(f"td must be a positive number of mm (got {row['td']!r})")
+            out.append(Filament(str(row["name"]), colour, td, abrasive))
         except (KeyError, ValueError, TypeError) as e:
             raise ValueError(f"bad filament entry {row!r}: {e}") from None
-        if f.td <= 0:
-            raise ValueError(f"{f.name}: td must be positive")
-        out.append(f)
     if not out:
         raise ValueError("no filaments in the list")
     return out
+
+
+@cache
+def white() -> Filament:
+    """Prusament PETG Signal White from the catalog: the viewer's "fully bright" and the
+    colour of white PETG prints."""
+    return next(f for f in load_filaments() if f.name == WHITE)
 
 
 CATALOG = "Prusament PETG (Prusa's TD table)"
