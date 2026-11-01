@@ -59,14 +59,13 @@ def datadir(setup: Setup, bundle: Path | None, cmd: list[str] | None = None) -> 
         folder = Path(tmp)
         (folder / "vendor").mkdir()
         shutil.copyfile(bundle, folder / "vendor" / "PrusaResearch.ini")
-        variant = f"{setup.printer.nozzle:g}"
         (folder / "PrusaSlicer.ini").write_text(
             "[presets]\n"
             f"print = {setup.print_preset}\n"
             f"filament = {setup.filament_preset}\n"
             f"printer = {setup.printer_preset}\n\n"
             "[vendor:PrusaResearch]\n"
-            f"model:{setup.printer.model} = {variant}\n",
+            f"model:{setup.model} = {setup.variant}\n",
             encoding="utf-8",
         )
         yield ["--datadir", str(folder)]
@@ -115,8 +114,34 @@ def summary(gcode: Path) -> dict:
         "support_lines": text.count(";TYPE:Support material"),
         "printer": value("printer_settings_id"),
         "print": value("print_settings_id"),
-        "filament": value("filament_settings_id").strip('"'),
+        "filament": _setting(value("filament_settings_id")),
     }
+
+
+def _setting(value: str) -> str:
+    """One preset name from a G-code setting: `"A";"A"` (one per extruder) gives A."""
+    return value.split(";")[0].strip().strip('"')
+
+
+def check_presets(info: dict, setup: Setup) -> None:
+    """PrusaSlicer quietly takes other presets when the asked ones do not fit together or
+    the printer model is not installed; make that an error."""
+    wrong = [
+        f"{kind} {_setting(info[kind])!r} instead of {want!r}"
+        for kind, want in (
+            ("printer", setup.printer_preset),
+            ("print", setup.print_preset),
+            ("filament", setup.filament_preset),
+        )
+        if _setting(info[kind]) != want
+    ]
+    if wrong:
+        raise ValueError(
+            "PrusaSlicer used other presets: "
+            + "; ".join(wrong)
+            + ". Check that the three presets go together (same printer and nozzle), or set "
+            "LITHOPHANE_FORGE_PROFILES to PrusaSlicer's PrusaResearch.ini"
+        )
 
 
 def config_from_gcode(gcode: Path, binary_gcode: bool) -> str:

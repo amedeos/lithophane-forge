@@ -59,8 +59,23 @@ def test_every_preset_exists(key, material):
     s = printers.setup(key, material)
     assert s.layer == pytest.approx(0.10)
     p = printers.PRINTERS[key]
-    # the fallback numbers in the table match the bundle
+    # the fallback values in the table match the bundle
     assert s.bed == pytest.approx(p.bed)
+    assert s.binary_gcode == p.binary
+    assert (s.model, s.variant) == (p.model, f"{p.nozzle:g}")
+
+
+@installed
+def test_other_nozzle_installs_its_variant():
+    """With presets for a 0.6 nozzle, PrusaSlicer must get the 0.6 variant installed."""
+    s = printers.setup(
+        "mk4",
+        "petg",
+        printer_preset="Original Prusa MK4 Input Shaper 0.6 nozzle",
+        print_preset="0.15mm STRUCTURAL @MK4IS 0.6",
+        filament_preset="Prusament PETG @PGIS 0.6",
+    )
+    assert (s.model, s.variant) == ("MK4IS", "0.6")
 
 
 @installed
@@ -76,3 +91,17 @@ def test_setup_without_bundle(monkeypatch):
     assert s.bed == printers.PRINTERS["coreone"].bed
     assert s.filament_preset == "Prusament PLA @COREONE"
     assert s.layer == 0.10 and s.binary_gcode
+    assert (s.model, s.variant) == ("COREONE", "0.4")
+    assert not printers.setup("mk3s", "petg").binary_gcode  # the MK3S reads text G-code
+
+
+def test_other_presets_are_an_error():
+    """PrusaSlicer may take other presets than the ones we ask for; that must not pass."""
+    from lithophane_forge import slicer
+
+    s = printers.setup("mk4", "petg")
+    info = {"printer": s.printer_preset, "print": s.print_preset, "filament": s.filament_preset}
+    slicer.check_presets(info, s)
+    slicer.check_presets({**info, "filament": f'"{s.filament_preset}";"{s.filament_preset}"'}, s)
+    with pytest.raises(ValueError, match="instead of"):
+        slicer.check_presets({**info, "filament": "3D-Fuel Pro PCTG @PG"}, s)

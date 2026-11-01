@@ -12,10 +12,15 @@ from functools import cache
 from pathlib import Path
 
 ENV = "LITHOPHANE_FORGE_PROFILES"
+FLATPAK = "app/com.prusa3d.PrusaSlicer/current/active/files/share/PrusaSlicer/profiles"
 SEARCH = (
     Path("/usr/share/PrusaSlicer/profiles"),
     Path.home() / ".config/PrusaSlicer/vendor",
     Path("/usr/local/share/PrusaSlicer/profiles"),
+    # the Flatpak: the bundle it ships (system or user install), then its data folder
+    Path("/var/lib/flatpak") / FLATPAK,
+    Path.home() / ".local/share/flatpak" / FLATPAK,
+    Path.home() / ".var/app/com.prusa3d.PrusaSlicer/config/PrusaSlicer/vendor",
 )
 BUNDLE = "PrusaResearch.ini"
 

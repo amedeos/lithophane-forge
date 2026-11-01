@@ -19,6 +19,7 @@ STANDING = {"flat", "curved", "cylinder"}  # the others print lying on the bed
 DEFAULT_WIDTH = 100.0
 DEFAULT_DIAMETER = 80.0
 CYLINDER_HEIGHT = 1.25  # default cylinder height, as a share of the diameter
+MAX_ARC = 300.0  # degrees: a curved panel bent further would almost close (and topple)
 BRIM = 8.0  # mm of brim for a panel printed standing
 BED_MARGIN = 2.0  # keep this far from the bed edge (plus the brim)
 MIN_SHAPED_FRAME = 1.5  # a shaped panel's frame hides the grid's stepped edge
@@ -84,6 +85,11 @@ class Job:
             raise ValueError(f"a shaped panel needs a frame of at least {MIN_SHAPED_FRAME} mm")
         if self.repeat < 1:
             raise ValueError("--repeat must be at least 1")
+        if self.shape == "curved" and not 10 <= self.arc <= MAX_ARC:
+            raise ValueError(
+                f"the arc must be 10 to {MAX_ARC:g} degrees (got {self.arc:g}); "
+                "for a full circle use --shape cylinder"
+            )
 
 
 @dataclass
@@ -315,7 +321,7 @@ def make(job: Job) -> Result:
     job.check()
     res = Result()
     rgb = image.load(job.photo)
-    cropped = image.frame(rgb, rgb.shape[1] / rgb.shape[0], job.crop)
+    cropped = image.crop(rgb, job.crop)  # the panel takes the aspect of the user's crop
     lay = layout(job, cropped.shape[1] / cropped.shape[0])
     res.layout = lay
     if lay.pitch > job.pitch + 1e-9:
@@ -430,6 +436,7 @@ def slice_project(job: Job, cmd: list[str], project: Path, res: Result, name: st
         gcode = Path(tmp) / "probe.gcode"
         slicer.run(cmd, project, gcode, setup.presets(), extra=tuple(dd))
         info = slicer.summary(gcode)
+        slicer.check_presets(info, setup)
         threemf.add_config(project, slicer.config_from_gcode(gcode, setup.binary_gcode))
         if job.slice:
             ext = "bgcode" if setup.binary_gcode else "gcode"

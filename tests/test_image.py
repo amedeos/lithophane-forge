@@ -18,6 +18,31 @@ def test_crop_comes_first():
     assert out.shape[:2] == (100, 100) and out.min() == 1
 
 
+def test_crop_alone_keeps_its_shape():
+    rgb = np.zeros((300, 400, 3))
+    assert image.crop(rgb, (10, 20, 100, 100)).shape[:2] == (100, 100)
+    assert image.crop(rgb, None) is rgb
+    with pytest.raises(ValueError, match="outside"):
+        image.crop(rgb, (500, 0, 10, 10))
+
+
+@pytest.mark.parametrize("mode, suffix", [("I;16", ".png"), ("I", ".tif")])
+def test_load_16_bit_grey(tmp_path, mode, suffix):
+    """16-bit grey images are scaled, not clipped at 255."""
+    from PIL import Image
+
+    ramp = np.linspace(0, 65535, 256).astype(np.uint16)[None, :].repeat(32, 0)
+    path = tmp_path / f"grey16{suffix}"
+    im = Image.fromarray(ramp)
+    (im if mode == "I;16" else im.convert("I")).save(path)
+    with Image.open(path) as check:
+        assert check.mode == mode
+    rgb = image.load(path)
+    assert rgb.shape == (32, 256, 3)
+    assert rgb.mean() == pytest.approx(0.5, abs=0.01)
+    assert rgb[0, 0, 0] == 0 and rgb[0, -1, 2] == pytest.approx(1)
+
+
 def test_parse_crop():
     assert image.parse_crop("1,2,3,4") == (1, 2, 3, 4)
     with pytest.raises(ValueError):
@@ -35,7 +60,10 @@ def test_light_map_stretches_to_full_range():
 def test_invert_and_gamma():
     rgb = np.dstack([np.linspace(0, 1, 100)[None, :].repeat(10, 0)] * 3)
     plain = image.light_map(rgb)
-    assert np.allclose(image.light_map(rgb, image.Tone(invert=True)), 1 - plain)
+    inverted = image.light_map(rgb, image.Tone(invert=True))
+    # a negative in lightness: L* 100 - L*, so mid-grey stays mid-grey
+    lstar = image.y_to_lstar(plain)
+    assert np.allclose(image.y_to_lstar(inverted), 100 - lstar, atol=1e-6)
     darker = image.light_map(rgb, image.Tone(gamma=1.5))
     assert darker[0, 50] < plain[0, 50]
 
