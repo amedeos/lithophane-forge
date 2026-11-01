@@ -102,6 +102,7 @@ td = 0.3
 name = "Prusament PETG Tungsten 75%"
 hex = "#545251"
 td = 0.3
+abrasive = true  # 75 % tungsten powder: Prusa asks for a hardened steel nozzle
 
 [[filament]]
 name = "Prusament PETG Prusa Galaxy Black"

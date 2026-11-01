@@ -2,6 +2,8 @@
 # project). The hex values are close to Prusament PETG. The td values are estimates taken
 # from the closest Prusament PETG colour in Prusa's TD table; measure your own spools
 # for better results (td = mm of filament that let about 10 % of the light through).
+# Mark a filament that needs a hardened steel nozzle with abrasive = true: it is then
+# used only with --allow-abrasive.
 
 [[filament]]
 name = "white"

@@ -25,6 +25,11 @@ class UsageError(Exception):
     pass
 
 
+ABRASIVE_HELP = (
+    "also suggest abrasive filaments (Tungsten 75 %%): only with a hardened steel nozzle"
+)
+
+
 def _number(kind=float, low: float | None = None, high: float | None = None):
     def parse(text: str):
         try:
@@ -71,6 +76,7 @@ def parser() -> argparse.ArgumentParser:
         help="also find the ideal colours for a colour print with this many filaments",
     )
     a.add_argument("--filaments", type=Path, help="your filaments (TOML) instead of the catalog")
+    a.add_argument("--allow-abrasive", action="store_true", help=ABRASIVE_HELP)
 
     m = sub.add_parser(
         "make",
@@ -188,6 +194,7 @@ def parser() -> argparse.ArgumentParser:
         help="TOML file with your filaments ([[filament]] name, hex, td) instead of the "
         "Prusament PETG catalog",
     )
+    col.add_argument("--allow-abrasive", action="store_true", help=ABRASIVE_HELP)
     prn = m.add_argument_group("printer")
     prn.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
     prn.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
@@ -251,6 +258,7 @@ def job_from(args: argparse.Namespace):
         mode=args.mode,
         colors=args.colors,
         filaments=args.filaments,
+        allow_abrasive=args.allow_abrasive,
         color_range=color_range,
         width=args.width,
         height=args.height,
@@ -346,10 +354,9 @@ def cmd_analyze(args) -> int:
         small = image.resize(rgb, 240, max(1, round(240 * rgb.shape[1] / rgb.shape[0])))
         h = palette.heights(*COLOR_RANGE, s.first_layer, s.layer)
         try:
-            choices = palette.load_filaments(args.filaments)
+            choices, source = palette.choices(args.filaments, args.allow_abrasive)
         except ValueError as e:
             raise UsageError(str(e)) from None
-        source = str(args.filaments) if args.filaments else "Prusament PETG (Prusa's TD table)"
         plan = palette.plan(palette.target(small), args.colors, h, choices, source)
         n = len(plan.real.filaments)
         print(f"colour print with {n} of {args.colors} filaments ({s.printer.title} layers):")
