@@ -1,6 +1,7 @@
 import json
 import math
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -164,6 +165,38 @@ def test_first_colour_of_white_prints(photo, petg, tmp_path, material, colour):
 
     j = job(photo, printers.setup("mk4", material), petg, tmp_path)
     assert forge.first_colour(j, forge.Result()) == colour
+
+
+def test_old_outputs_go_away(photo, setup, petg, tmp_path, no_slicer):
+    """G-code from an earlier --slice run must not stay next to a new project."""
+    import shutil
+
+    folder = tmp_path / "out" / "photo"
+    folder.mkdir(parents=True)
+    old = ["photo.bgcode", "photo.gcode", "photo-stand.3mf", "photo-lamp-base.stl"]
+    for name in old:
+        (folder / name).write_text("old")
+    (folder / "notes.txt").write_text("mine")
+    inside = shutil.copy(photo, folder / "photo.png")  # the photo itself, kept in the folder
+    forge.make(job(Path(inside), setup, petg, tmp_path, width=40, pitch=0.5))
+    assert not any((folder / name).exists() for name in old)
+    assert (folder / "notes.txt").exists() and Path(inside).exists()
+    assert (folder / "photo.3mf").exists()
+
+
+def test_small_shaped_panel_is_a_clear_error(setup, petg, tmp_path):
+    j = Job(photo=tmp_path / "x", setup=setup, optics=petg, shape="shaped", width=10)
+    with pytest.raises(ValueError, match="too small for a 3 mm frame"):
+        forge.layout(j, 4 / 3)
+
+
+@pytest.mark.parametrize("mode", ["mono", "color"])
+def test_shaped_frame_hides_the_steps(setup, petg, tmp_path, mode):
+    """A shaped panel's frame must reach the top of the picture, or its steps show."""
+    j = Job(photo=tmp_path / "x", setup=setup, optics=petg, shape="shaped", mode=mode)
+    j.check()
+    with pytest.raises(ValueError, match="--frame-t"):
+        replace(j, frame_t=1.5).check()
 
 
 def test_volume_counts_every_part(photo, setup, petg, tmp_path, no_slicer):

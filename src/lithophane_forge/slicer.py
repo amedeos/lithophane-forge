@@ -34,9 +34,15 @@ ENV = "PRUSA_SLICER"
 
 
 def command() -> list[str] | None:
-    """The PrusaSlicer command, or None if it is not installed."""
+    """The PrusaSlicer command, or None if it is not installed. A $PRUSA_SLICER that names
+    no command is an error, not "not installed": the user asked for it."""
     if os.environ.get(ENV):
-        return shlex.split(os.environ[ENV])
+        cmd = shlex.split(os.environ[ENV])
+        if not cmd or shutil.which(cmd[0]) is None:
+            raise ValueError(
+                f"{ENV}={os.environ[ENV]!r} does not name a command; fix it or unset it"
+            )
+        return cmd
     for name in ("prusa-slicer", "PrusaSlicer", "prusa-slicer-console"):
         if shutil.which(name):
             return [name]

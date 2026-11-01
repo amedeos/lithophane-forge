@@ -34,8 +34,8 @@ uv run lithophane-forge printers
 ```
 
 - Test photos go in `photos/` (git-ignored, only `.gitkeep` is tracked): the owner's personal photos never go into the repository.
-- Output goes to `out/<name>/` (git-ignored): `<name>.stl`, `<name>.3mf` (project), `<name>.bgcode` with `--slice`, `preview.png`, `plan.json`, `report.md`.
-- `$LITHOPHANE_FORGE_PROFILES` names the PrusaResearch.ini (or its folder) when it is not in `profiles.SEARCH` (system install, PrusaSlicer's data folder, Flatpak). `$PRUSA_SLICER` names the PrusaSlicer command.
+- Output goes to `out/<name>/` (git-ignored). `forge.clear_outputs` first removes what an earlier run wrote there under the same name (only the kinds of file we write, never the photo), so no stale G-code stays next to a new project: `<name>.stl`, `<name>.3mf` (project), `<name>.bgcode` with `--slice`, `preview.png`, `plan.json`, `report.md`.
+- `$LITHOPHANE_FORGE_PROFILES` names the PrusaResearch.ini (or its folder) when it is not in `profiles.SEARCH` (system install, PrusaSlicer's data folder, Flatpak). `$PRUSA_SLICER` names the PrusaSlicer command; a value that names no command is a usage error, not "PrusaSlicer not found".
 
 ## Layout
 

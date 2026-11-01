@@ -127,7 +127,9 @@ def parser() -> argparse.ArgumentParser:
         "--frame", type=_number(float, 0), default=3.0, help="frame width in mm (0: none)"
     )
     size.add_argument(
-        "--frame-t", type=_number(float, 0.5), help="frame thickness in mm (default: t_max + 0.8)"
+        "--frame-t",
+        type=_number(float, 0.5),
+        help="frame thickness in mm (default: t_max + 0.8 in mono, the top of the stack in colour)",
     )
     size.add_argument(
         "--view",
@@ -240,6 +242,11 @@ def job_from(args: argparse.Namespace):
         )
         mode = args.mode or ("color" if args.shape in ("flat", "shaped") else "mono")
         mono = mode == "mono"
+        if not mono and args.td is not None:
+            raise ValueError(
+                "--td is for white prints (--mode mono); in colour the filaments' own TD "
+                "values count, and --t-min/--t-max set the height range of the stack"
+            )
         opt = optics.optics(
             args.material, args.t_min if mono else None, args.t_max if mono else None, args.td
         )
@@ -337,7 +344,10 @@ def cmd_analyze(args) -> int:
         raise UsageError(f"no such photo: {args.photo}")
     if args.filaments and not args.filaments.is_file():
         raise UsageError(f"no such filament list: {args.filaments}")
-    rgb = image.load(args.photo)
+    try:
+        rgb = image.load(args.photo)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
     a = image.analyse(rgb)
     print(f"{args.photo.name}: {a.size[0]} x {a.size[1]} px")
     print(
@@ -410,7 +420,10 @@ def cmd_printers(args) -> int:
         f"PrusaSlicer bundle: {bundle or 'not found'}"
         + (f" (version {profiles.load(bundle).version})" if bundle else "")
     )
-    cmd = slicer.command()
+    try:
+        cmd = slicer.command()
+    except ValueError as e:
+        raise UsageError(str(e)) from None
     found = f"{' '.join(cmd)} (version {slicer.version(cmd)})" if cmd else "not found"
     print(f"PrusaSlicer command: {found}")
     problems = 0

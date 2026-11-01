@@ -97,6 +97,7 @@ def make(job: Job) -> Result:
     res.volume_cm3 = whole.volume() / 1000
     folder = job.folder
     folder.mkdir(parents=True, exist_ok=True)
+    forge.clear_outputs(folder, job.stem)
     lit = render.backlit(t, job.optics)
     res.files["preview"] = render.sheet(
         [("lit from behind (simulated, default td)", lit), forge.relief_panel(job, t, lay.pitch)],

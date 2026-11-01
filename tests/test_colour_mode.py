@@ -79,6 +79,20 @@ def test_colour_options_are_checked(setup, petg, tmp_path, kw, message):
         j.check()
 
 
+def test_preview_shows_the_shaped_frame():
+    """Outside the inner outline the frame volume covers the picture with the whole stack."""
+
+    class Fit:
+        colours = np.array([[1.0, 1.0, 1.0], [0.1, 0.05, 0.0]])
+
+    sim = np.full((4, 5, 3), 0.5)
+    inner = np.zeros((4, 5), bool)
+    inner[1:3, 1:4] = True
+    seen = forge.with_frame(sim, inner, Fit)
+    assert np.allclose(seen[inner], 0.5) and np.allclose(seen[~inner], Fit.colours[-1])
+    assert forge.with_frame(sim, None, Fit) is sim
+
+
 def test_colour_frame_is_the_whole_stack(setup, petg, tmp_path):
     j = Job(photo=tmp_path / "x", setup=setup, optics=petg, mode="color")
     assert j.frame_thickness == forge.COLOR_RANGE[1]
