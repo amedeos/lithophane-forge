@@ -108,6 +108,11 @@ def test_more_colours_do_not_collapse(heights):
     assert six < 6 and six < four + 2
 
 
+def test_white_is_signal_white():
+    assert P.white().name == "Prusament PETG Signal White"
+    assert (P.white().hex, P.white().td) == ("#E5E0E1", 3.4)  # Prusa's table
+
+
 def test_abrasive_filaments_are_left_out(tmp_path):
     """Tungsten 75 % needs a hardened steel nozzle: only --allow-abrasive suggests it."""
     tungsten = "Prusament PETG Tungsten 75%"
@@ -135,3 +140,33 @@ def test_load_filaments(tmp_path):
     bad.write_text('[[filament]]\nname = "x"\nhex = "#ffffff"\ntd = 0\n', encoding="utf-8")
     with pytest.raises(ValueError):
         P.load_filaments(bad)
+
+
+@pytest.mark.parametrize(
+    "value, result",
+    [
+        ('"ece8dc"', "#ECE8DC"),
+        ('"#ece8dc"', "#ECE8DC"),
+        ('" #ECE8DC "', "#ECE8DC"),
+        ('"#ECE8DC80"', None),
+        ('"#E5E0E1;#000000"', None),
+        ('"#ECE"', None),
+    ],
+)
+def test_filament_hex_is_checked_and_spelled_one_way(tmp_path, value, result):
+    """The hex goes to the preview, the M600 list and PrusaSlicer: only #RRGGBB passes."""
+    path = tmp_path / "f.toml"
+    path.write_text(f'[[filament]]\nname = "x"\nhex = {value}\ntd = 1\n', encoding="utf-8")
+    if result is None:
+        with pytest.raises(ValueError, match="#RRGGBB"):
+            P.load_filaments(path)
+    else:
+        assert P.load_filaments(path)[0].hex == result
+
+
+@pytest.mark.parametrize("td", ["nan", "inf", "-1"])
+def test_filament_td_must_be_a_positive_number(tmp_path, td):
+    path = tmp_path / "f.toml"
+    path.write_text(f'[[filament]]\nname = "x"\nhex = "#808080"\ntd = {td}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="td must be"):
+        P.load_filaments(path)

@@ -89,11 +89,13 @@ uv run lithophane-forge printers
 ## 3MF and PrusaSlicer notes
 
 - We write the 3MF ourselves (numpy → XML). `Metadata/Slic3r_PE_model.config` gives each object its volumes (triangle ranges) and per-object settings. PrusaSlicer joins overlapping volumes of one object when it slices (checked by hand with two crossing boxes: the filament matches the union).
-- Per-object settings keep the system presets clean: the project shows "Original Prusa MK4 Input Shaper 0.4 nozzle", "0.10mm FAST DETAIL @MK4IS 0.4", "Prusament PETG @PGIS", plus the object's own perimeters, 100 % infill, rear seam and 8 mm brim.
+- Per-object settings keep the system presets clean (the one exception is the filament colour, below): the project shows "Original Prusa MK4 Input Shaper 0.4 nozzle", "0.10mm FAST DETAIL @MK4IS 0.4", "Prusament PETG @PGIS", plus the object's own perimeters, 100 % infill, rear seam and 8 mm brim.
 - The CLI crashes on `--export-3mf` without a display. So `make` slices once to text G-code, copies the `; prusaslicer_config` block into `Metadata/Slic3r_PE.config` and sets `binary_gcode` back to the printer's value. `--slice` slices the project a second time to `.bgcode`. The auto-support probe and the "project carries the printer" check live in `tests/test_slicer.py`, not in every run.
 - Every slice gets a temporary `--datadir` with the vendor bundle and a `PrusaSlicer.ini` that installs the printer model and the variant (nozzle) of the printer preset in use, so results do not depend on the user's PrusaSlicer settings. PrusaSlicer silently takes other presets when the model or variant is missing, so `slicer.check_presets` compares the G-code's preset names with the asked ones and fails loudly.
 - 100 % infill needs `fill_pattern = rectilinear`: the presets' default pattern refuses 100 %.
 - M600 entries need `bed_idx="0"` (PrusaSlicer 2.9), or the GUI silently drops them.
+- The filament presets in the printer table all have `filament_colour = #FF8000` (orange; other Prusament presets in the bundle differ). `slice_project` passes `--filament-colour` to the first slice with `forge.first_colour`: the colour plan's first filament, or for white prints Signal White (`palette.white()`, from the catalog) in PETG and plain white in PLA. So the project and its G-code start with the filament you really load; the preset name does not change, but PrusaSlicer's GUI shows the filament preset as modified. Accessories keep the preset's colour. Without PrusaSlicer the 3MF has no configuration, so plan.json's `printer.filament_colour` is null.
+- `load_filaments` accepts only `#RRGGBB` (or `RRGGBB`) and writes it as `#RRGGBB`: the same string goes to the preview, the M600 list and PrusaSlicer.
 - Headless slicing makes no G-code thumbnail for the printer's screen. The 3MF has our own `Metadata/thumbnail.png`.
 
 ## Checks after any change

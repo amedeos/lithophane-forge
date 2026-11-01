@@ -38,6 +38,7 @@ def test_make_without_slicer(photo, setup, petg, tmp_path, no_slicer, shape):
     assert (lo[:2] + hi[:2]) / 2 == pytest.approx([setup.bed[0] / 2, setup.bed[1] / 2])
     plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
     assert plan["shape"] == shape and plan["printer"]["filament"] == "Prusament PETG @PGIS"
+    assert plan["printer"]["filament_colour"] is None  # no PrusaSlicer: the 3MF has no colour
     assert plan["pose"] == ("standing" if shape in forge.STANDING else "lying")
 
 
@@ -154,6 +155,15 @@ def test_arc_is_limited(setup, petg, tmp_path):
     j = Job(photo=tmp_path / "x.png", setup=setup, optics=petg, shape="curved", arc=360)
     with pytest.raises(ValueError, match="cylinder"):
         j.check()
+
+
+@pytest.mark.parametrize("material, colour", [("petg", "#E5E0E1"), ("pla", forge.PLAIN_WHITE)])
+def test_first_colour_of_white_prints(photo, petg, tmp_path, material, colour):
+    """White prints start with Signal White in PETG, plain white in PLA (no catalog)."""
+    from lithophane_forge import printers
+
+    j = job(photo, printers.setup("mk4", material), petg, tmp_path)
+    assert forge.first_colour(j, forge.Result()) == colour
 
 
 def test_volume_counts_every_part(photo, setup, petg, tmp_path, no_slicer):

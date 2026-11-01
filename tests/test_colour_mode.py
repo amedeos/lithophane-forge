@@ -48,6 +48,9 @@ def test_colour_make(sunset_photo, setup, petg, tmp_path, no_slicer, shape):
     lo, hi = j.color_range
     assert f"thickness {lo:g} to {hi:g} mm" in report  # the stack, not the mono optics
     assert "Tungsten" not in json.dumps(plan["colour"]["print"])  # abrasive: left out
+    first = plan["colour"]["print"]["filaments"][0]["hex"]
+    assert forge.first_colour(j, res) == first
+    assert plan["printer"]["filament_colour"] is None  # no_slicer: the 3MF carries no colour
     assert "left out as abrasive" in plan["colour"]["source"]
     assert plan["optics"] is None and plan["color_range_mm"] == [lo, hi]
 
