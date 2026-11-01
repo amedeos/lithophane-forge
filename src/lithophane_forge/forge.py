@@ -539,10 +539,16 @@ def colour_notes(job: Job, plan) -> list[str]:
             "and this photo's colours do not lie on one path; see preview.png, or try "
             "--colors with one more filament"
         )
-    if len(plan.real.filaments) < job.colors:
+    used = len(plan.real.filaments)
+    if plan.available < job.colors:
         notes.append(
-            f"{len(plan.real.filaments)} filaments are enough for this photo (you asked for "
-            f"{job.colors}): more changes would not bring it closer"
+            f"the filament list has only {plan.available} filaments for {job.colors} "
+            f"colours; the plan uses {used}"
+        )
+    elif used < job.colors:
+        notes.append(
+            f"the plan uses {used} of the {job.colors} filaments: the search found no "
+            "place for more that brings the print closer to the photo"
         )
     if job.setup.material != "petg" and job.filaments is None:
         notes.append(

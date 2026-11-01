@@ -18,6 +18,29 @@ def sunset(h=90, w=120):
     return img
 
 
+def lake(h=90, w=120):
+    """Blue sky, a white cloud, warm houses, dark blue water: a hard photo for one path."""
+    y = np.linspace(0, 1, h)[:, None, None]
+    img = np.broadcast_to(
+        np.array([0.25, 0.45, 0.85]) + y * np.array([0.35, 0.3, 0.1]), (h, w, 3)
+    ).copy()
+    img[int(h * 0.15) : int(h * 0.25), int(w * 0.1) : int(w * 0.4)] = [0.95, 0.95, 0.97]
+    img[int(h * 0.55) : int(h * 0.7)] = [0.75, 0.45, 0.3]
+    img[int(h * 0.62) : int(h * 0.7), ::7] = [0.45, 0.25, 0.15]
+    img[int(h * 0.7) :] = [0.1, 0.18, 0.3]
+    return np.clip(img, 0, 1)
+
+
+def blobs(seed: int, h=90, w=120):
+    """Random coloured boxes on a random ground: no path fits them well."""
+    r = np.random.default_rng(seed)
+    img = np.zeros((h, w, 3)) + r.random(3)
+    for _ in range(6):
+        y0, x0 = r.integers(0, h - 10), r.integers(0, w - 10)
+        img[y0 : y0 + r.integers(10, 40), x0 : x0 + r.integers(10, 50)] = r.random(3)
+    return img
+
+
 @pytest.fixture(scope="module")
 def heights():
     return P.heights(0.6, 3.0, 0.2, 0.1)
@@ -111,6 +134,67 @@ def test_more_colours_do_not_collapse(heights):
 def test_white_is_signal_white():
     assert P.white().name == "Prusament PETG Signal White"
     assert (P.white().hex, P.white().td) == ("#E5E0E1", 3.4)  # Prusa's table
+
+
+def test_four_colours_use_four_filaments_when_they_help(heights):
+    """Choosing filaments with the heights fixed stopped at 3 filaments on this photo; with
+    the change height chosen together with the filament, the fourth one finds its place."""
+    t = P.target(lake())
+    choices, source = P.choices()
+    fitter = P.Fitter(t, heights)
+    three = P.plan(t, 3, heights, choices, source).real
+    four = P.plan(t, 4, heights, choices, source).real
+    assert len(four.filaments) == 4
+    assert (
+        fitter.cost_of(four.filaments, four.starts)
+        < fitter.cost_of(three.filaments, three.starts) - 1
+    )
+
+
+def test_snapping_cannot_spoil_the_choice(heights):
+    """A search that fitted heights between layer tops chose a plan here that got worse
+    once snapped to layers (cost 28.0, worse than the 26.6 of fixed heights). The search
+    now stays on layer tops, so the printed plan is the one it scored."""
+    t = P.target(blobs(0))
+    choices, source = P.choices()
+    plan = P.plan(t, 4, heights, choices, source)
+    assert P.Fitter(t, heights).cost_of(plan.real.filaments, plan.real.starts) < 26.6
+
+
+def test_choose_stays_on_layer_tops(heights):
+    t = P.target(lake())
+    fitter = P.Fitter(t, heights)
+    choices, _ = P.choices()
+    wanted = choices[:5]
+    picked, starts = fitter.choose([(wanted, np.array([0, 0.9, 1.4, 2.0, 2.6]))], choices)
+    assert len(picked) == 5 and starts[0] == 0
+    assert all(np.isclose(heights, z).any() for z in starts[1:])
+    assert np.all(np.diff(starts) > 0)
+
+
+def test_no_optimiser_warnings(heights):
+    """Warnings from scipy reached the user's terminal."""
+    import warnings
+
+    from scipy.optimize import OptimizeWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", OptimizeWarning)
+        P.plan(P.target(lake()), 6, heights, *P.choices())
+
+
+def test_batched_cost_is_the_cost(heights):
+    """Fitter.costs (all candidates at once, lower heights reused) agrees with cost()."""
+    fitter = P.Fitter(P.target(lake()), heights)
+    fil = P.load_filaments()[:4]
+    starts = np.array([0, 0.9, 1.5, 2.2])
+    att = P._attenuation(fil)
+    plain = fitter.cost(att, starts)
+    low, high = heights[heights <= 0.9 + 1e-9], heights[heights > 0.9 + 1e-9]
+    below = fitter._nearest_d2(att[None], starts[None], low)[0]
+    assert fitter.costs(att, starts[None], high, below)[0] == pytest.approx(plain, rel=1e-6)
+    many = fitter.costs(np.repeat(att[None], 3, 0), np.repeat(starts[None], 3, 0))
+    assert many == pytest.approx([plain] * 3, rel=1e-6)
 
 
 def test_abrasive_filaments_are_left_out(tmp_path):
