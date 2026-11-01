@@ -122,7 +122,9 @@ def make(job: Job) -> Result:
             "not the printer presets"
         )
     else:
-        res.sliced["calibration"] = forge.slice_project(job, cmd, project, res, "lithophane")
+        res.sliced["calibration"] = forge.slice_project(
+            job, cmd, project, res, "lithophane", forge.first_colour(job, res)
+        )
     res.files["report"] = folder / "report.md"
     res.files["report"].write_text(report(job, res), encoding="utf-8")
     return res

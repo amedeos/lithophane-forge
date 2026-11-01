@@ -34,6 +34,7 @@ from .image import linear_to_srgb, srgb_to_linear
 
 LN10 = np.log(10)
 WHITE_TD = 3.4  # Prusament PETG Signal White: the reference for "fully bright"
+WHITE_HEX = "#E5E0E1"  # the same white: the filament colour of mono prints in the project
 D65 = np.array([0.95047, 1.0, 1.08883])
 M_XYZ = np.array(
     [

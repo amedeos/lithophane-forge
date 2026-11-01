@@ -108,6 +108,11 @@ def test_more_colours_do_not_collapse(heights):
     assert six < 6 and six < four + 2
 
 
+def test_white_is_signal_white():
+    white = next(f for f in P.load_filaments() if f.name == "Prusament PETG Signal White")
+    assert P.WHITE_HEX == white.hex and white.td == P.WHITE_TD
+
+
 def test_abrasive_filaments_are_left_out(tmp_path):
     """Tungsten 75 % needs a hardened steel nozzle: only --allow-abrasive suggests it."""
     tungsten = "Prusament PETG Tungsten 75%"

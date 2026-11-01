@@ -94,6 +94,7 @@ uv run lithophane-forge printers
 - Every slice gets a temporary `--datadir` with the vendor bundle and a `PrusaSlicer.ini` that installs the printer model and the variant (nozzle) of the printer preset in use, so results do not depend on the user's PrusaSlicer settings. PrusaSlicer silently takes other presets when the model or variant is missing, so `slicer.check_presets` compares the G-code's preset names with the asked ones and fails loudly.
 - 100 % infill needs `fill_pattern = rectilinear`: the presets' default pattern refuses 100 %.
 - M600 entries need `bed_idx="0"` (PrusaSlicer 2.9), or the GUI silently drops them.
+- Every Prusament filament preset has `filament_colour = #FF8000` (orange). `slice_project` passes `--filament-colour` to the first slice with `forge.first_colour` (the colour plan's first filament, or `palette.WHITE_HEX` for mono and calibration), so the project and its G-code start with the filament you really load; the preset name does not change. Accessories keep the preset's colour. The GUI may mark the filament preset as modified because of it.
 - Headless slicing makes no G-code thumbnail for the printer's screen. The 3MF has our own `Metadata/thumbnail.png`.
 
 ## Checks after any change

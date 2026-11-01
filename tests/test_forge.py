@@ -38,6 +38,7 @@ def test_make_without_slicer(photo, setup, petg, tmp_path, no_slicer, shape):
     assert (lo[:2] + hi[:2]) / 2 == pytest.approx([setup.bed[0] / 2, setup.bed[1] / 2])
     plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
     assert plan["shape"] == shape and plan["printer"]["filament"] == "Prusament PETG @PGIS"
+    assert plan["printer"]["filament_colour"] == "#E5E0E1"  # white PETG, not the presets' orange
     assert plan["pose"] == ("standing" if shape in forge.STANDING else "lying")
 
 

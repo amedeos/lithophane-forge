@@ -511,7 +511,9 @@ def make(job: Job) -> Result:
         )
     else:
         for name, path in projects.items():
-            res.sliced[name] = slice_project(job, cmd, path, res, name)
+            # accessories print in any colour: they keep the preset's
+            colour = first_colour(job, res) if name == "lithophane" else None
+            res.sliced[name] = slice_project(job, cmd, path, res, name, colour)
     write_plan(job, res)
     return res
 
@@ -559,16 +561,30 @@ def relief_panel(job: Job, t_view: np.ndarray, pitch: float, mask=None):
     return "relief side (front)", render.relief(t_view, pitch, mask)
 
 
-def slice_project(job: Job, cmd: list[str], project: Path, res: Result, name: str) -> dict:
+def first_colour(job: Job, res: Result) -> str:
+    """The colour of the filament the print starts with: the first filament of the colour
+    plan, or white PETG. The Prusament presets all say orange (#FF8000)."""
+    if res.colour is not None:
+        return res.colour.real.filaments[0].hex
+    from .palette import WHITE_HEX
+
+    return WHITE_HEX
+
+
+def slice_project(
+    job: Job, cmd: list[str], project: Path, res: Result, name: str, colour: str | None = None
+) -> dict:
     """Slice once to read the configuration into the project; with --slice, once more from
-    the project to the G-code you print."""
+    the project to the G-code you print. `colour` replaces the filament preset's colour, so
+    the project (and the G-code made from it) shows the filament you load first."""
     setup = job.setup
     with (
         tempfile.TemporaryDirectory() as tmp,
         slicer.datadir(setup, profiles.find_bundle(), cmd) as dd,
     ):
         gcode = Path(tmp) / "probe.gcode"
-        slicer.run(cmd, project, gcode, setup.presets(), extra=tuple(dd))
+        own = ("--filament-colour", colour) if colour else ()
+        slicer.run(cmd, project, gcode, setup.presets(), extra=(*dd, *own))
         info = slicer.summary(gcode)
         slicer.check_presets(info, setup)
         threemf.add_config(project, slicer.config_from_gcode(gcode, setup.binary_gcode))
@@ -634,6 +650,7 @@ def write_plan(job: Job, res: Result) -> None:
             "printer": s.printer_preset,
             "print": s.print_preset,
             "filament": s.filament_preset,
+            "filament_colour": first_colour(job, res),
             "material": s.material,
             "layer_mm": s.layer,
         },
