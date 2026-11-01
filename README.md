@@ -1,6 +1,6 @@
 # 🖼️ lithophane-forge
 
-Turn a photo into a 3D-printable lithophane, with a ready-to-print PrusaSlicer project for your Prusa printer (Original Prusa MK4 and white PETG by default). It also makes colour lithophanes on a printer with one extruder: it finds the ideal colours for the photo, suggests the closest real PETG filaments and plans the filament changes. Everything runs on the command line, on the CPU, in a few seconds; no GPU and no neural network are needed.
+Turn a photo into a 3D-printable lithophane, with a ready-to-print PrusaSlicer project for your Prusa printer (Original Prusa MK4 and white PETG by default). It also makes colour lithophanes on a printer with one extruder: it finds the ideal colours for the photo, picks real PETG filaments for them and plans the filament changes. Everything runs on the command line, on the CPU, in a few seconds. You need no GPU and no neural network.
 
 ## How it works
 
@@ -66,17 +66,17 @@ Everything goes to `out/<name>/`, where `<name>` is the photo's name (or `--name
 ## Printing
 
 - Use white filament. PETG lets more light through than PLA, so its thickness range is wider.
-- Standing panels print with a brim. Shaped panels print lying, flat face down: that face is the one you look at, so a smooth or satin sheet gives the cleanest result.
+- Standing panels print with a brim. Shaped and colour panels print lying, flat face down. By default you look at that face, so a smooth or satin sheet gives the cleanest result.
 - On the MK4, print PETG on the textured sheet, or use a release agent on the smooth sheet, and keep the filament dry.
 - Print the stand and the lamp base in any opaque colour; they use 0.2 mm layers.
 - Light it from behind with a diffuse, neutral white LED (about 4000 K). By default the flat face looks at you.
 
 ## Colour lithophanes
 
-A printer with one extruder changes colour only between layers: the printer stops (M600), you load the next filament, and it goes on. So a colour lithophane prints lying on the bed, and every point is a stack: the first filament from the bed up, then the second from the first change, and so on, cut at the point's own height. Lit from behind, the light crosses the whole stack.
+A printer with one extruder changes colour only between layers: the printer stops (M600), you load the next filament, and it goes on. So a colour lithophane prints lying on the bed, and every point is a stack of filaments. The first filament starts on the bed, the second starts at the first change, and so on; each point stops at its own height. Lit from behind, the light crosses the whole stack.
 
 - **One path of colours.** The colours a point can show lie on one path, from the first filament alone to the whole stack, from light to dark. A sunset, a portrait or a sepia photo fits such a path well; a photo with red and blue of the same lightness side by side does not. The tool tells you how close it gets (mean ΔE, CIEDE2000) and shows the simulated result in `preview.png`.
-- **Ideal colours first.** The tool looks for the colours and the change heights that bring the path closest to the photo, with no filament list in mind: k-means in CIELAB gives a start, then an optimiser moves the colours, how translucent each one is, and the heights. The base stays white or natural and translucent: it lies behind every point. `analyze --colors N` shows the ideal colours without making any file.
+- **Ideal colours first.** The tool looks for the colours and the change heights that bring the path closest to the photo, with no filament list in mind. k-means in CIELAB gives a start. Then an optimiser moves the colours, how translucent each one is, and the heights. The base stays white or natural and translucent, because it lies behind every point. `analyze --colors N` shows the ideal colours without making any file.
 - **Then real filaments.** It picks the Prusament PETG filaments that make the whole print closest to the photo, using the hex codes and TD (transparency) values that Prusa publishes, and fits the change heights again for them. They can differ from the filaments closest in colour to the ideal ones, which `report.md` also lists. With `--filaments FILE` it picks from your own list instead (see `examples/filaments.toml`). If fewer filaments do just as well, the plan uses fewer and says so.
 - **The project.** The 3MF carries the colour changes, so PrusaSlicer shows them and the MK4 stops at the right layers. `report.md` lists which filament to load at which height.
 
@@ -95,7 +95,12 @@ uv run pytest                     # add -m "not slicer" to skip the PrusaSlicer 
 uv run ruff check . && uv run ruff format --check .
 ```
 
-GitHub Actions runs ruff and the tests on every push and pull request.
+GitHub Actions runs ruff, the tests on Python 3.13 and 3.14, and a slicing check with PrusaSlicer on every pull request and on every push to `main`.
+
+## Contributing
+
+- Work on a feature branch (`feature/<topic>`) and open a pull request to `main`, for every change, small fixes included. A pull request is merged when CI is green; nobody commits to `main` directly.
+- Write everything in the repository in English at B2/C1 level: code comments, docs, commit messages and pull requests. Use short sentences and common words.
 
 ## License
 
