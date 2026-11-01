@@ -34,7 +34,7 @@ uv run lithophane-forge printers
 ```
 
 - Output goes to `out/<name>/` (git-ignored): `<name>.stl`, `<name>.3mf` (project), `<name>.bgcode` with `--slice`, `preview.png`, `plan.json`, `report.md`.
-- `$LITHOPHANE_FORGE_PROFILES` names the PrusaResearch.ini (or its folder) when it is not in `/usr/share/PrusaSlicer/profiles`. `$PRUSA_SLICER` names the PrusaSlicer command.
+- `$LITHOPHANE_FORGE_PROFILES` names the PrusaResearch.ini (or its folder) when it is not in `profiles.SEARCH` (system install, PrusaSlicer's data folder, Flatpak). `$PRUSA_SLICER` names the PrusaSlicer command.
 
 ## Layout
 
@@ -90,7 +90,7 @@ uv run lithophane-forge printers
 - We write the 3MF ourselves (numpy → XML). `Metadata/Slic3r_PE_model.config` gives each object its volumes (triangle ranges) and per-object settings. PrusaSlicer joins overlapping volumes of one object when it slices (checked by hand with two crossing boxes: the filament matches the union).
 - Per-object settings keep the system presets clean: the project shows "Original Prusa MK4 Input Shaper 0.4 nozzle", "0.10mm FAST DETAIL @MK4IS 0.4", "Prusament PETG @PGIS", plus the object's own perimeters, 100 % infill, rear seam and 8 mm brim.
 - The CLI crashes on `--export-3mf` without a display. So `make` slices once to text G-code, copies the `; prusaslicer_config` block into `Metadata/Slic3r_PE.config` and sets `binary_gcode` back to the printer's value. `--slice` slices the project a second time to `.bgcode`. The auto-support probe and the "project carries the printer" check live in `tests/test_slicer.py`, not in every run.
-- Every slice gets a temporary `--datadir` with the vendor bundle and a `PrusaSlicer.ini` that installs the printer model, so results do not depend on the user's PrusaSlicer settings.
+- Every slice gets a temporary `--datadir` with the vendor bundle and a `PrusaSlicer.ini` that installs the printer model and the variant (nozzle) of the printer preset in use, so results do not depend on the user's PrusaSlicer settings. PrusaSlicer silently takes other presets when the model or variant is missing, so `slicer.check_presets` compares the G-code's preset names with the asked ones and fails loudly.
 - 100 % infill needs `fill_pattern = rectilinear`: the presets' default pattern refuses 100 %.
 - M600 entries need `bed_idx="0"` (PrusaSlicer 2.9), or the GUI silently drops them.
 - Headless slicing makes no G-code thumbnail for the printer's screen. The 3MF has our own `Metadata/thumbnail.png`.

@@ -53,12 +53,12 @@ Everything goes to `out/<name>/`, where `<name>` is the photo's name (or `--name
 ## Options
 
 - **Size and shape:** `--width` and `--height` are the outer size in mm, frame included; give one and the photo sets the other, or both to crop the photo. `--frame` sets the frame width (0 for none).
-- **Curved:** `--shape curved` bends the panel on an arc of `--arc` degrees (the width is the arc length on the outside).
+- **Curved:** `--shape curved` bends the panel on an arc of `--arc` degrees, 10 to 300 (the width is the arc length on the outside).
 - **Cylinder:** `--shape cylinder --diameter D --height H` (the height is 1.25 × the diameter if you leave it out). The picture goes once around; a normal photo then loses its top and bottom, so `--repeat 2` puts it around twice (the tool suggests the best number). `--lamp-base` adds a base with a pocket for an LED tealight or puck light (`--led-diameter`, `--led-height`) and a notch for a cable.
 - **Shaped:** `--shape shaped --mask heart|oval|circle`, or `--mask` with an SVG file (its largest closed shape) or a PNG file (dark pixels are the shape). An oval takes the photo's proportions, a circle stays round. The frame follows the outline.
 - **Extras:** `--hole` adds a hanging tab with a 5 mm hole (flat and shaped panels); `--stand` makes a stand with a slot for a flat panel.
 - **Colour:** `--mode color --colors N` (2 to 8 filaments), `--filaments FILE` for your own list, `--t-min`/`--t-max` for the height range of the stack (0.6 to 3.0 mm by default). See below.
-- **Picture:** `--crop X,Y,W,H` (photo pixels), `--levels LOW,HIGH` (percentiles that become black and white), `--gamma`, `--clahe` (local contrast), `--invert`, `--view relief` (the relief faces the viewer instead of the flat face).
+- **Picture:** `--crop X,Y,W,H` (photo pixels; the panel takes the crop's shape unless you give both sizes), `--levels LOW,HIGH` (percentiles that become black and white), `--gamma`, `--clahe` (local contrast), `--invert` (a negative in lightness), `--view relief` (the relief faces the viewer instead of the flat face).
 - **Thickness:** `--t-min`, `--t-max` and `--td` (mm of your filament that let 10 % of the light through). The defaults for white PETG (0.8, 3.6 and 2.3 mm) are estimates: calibrate your spool for the best result.
 - **Printer:** `--printer` (`mk4`, `mk4s`, `mk3.5`, `mk3s`, `coreone`, `coreonel`, `xl`, `mini`), `--material petg|pla`, or your own presets with `--printer-preset`, `--print-preset` and `--filament-preset`.
 - **Detail:** `--pitch` (mm between grid points, 0.2 by default; a 0.4 mm nozzle gains nothing below that) and `--max-triangles`.

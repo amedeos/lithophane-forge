@@ -143,6 +143,51 @@ def test_svg_and_png_masks(tmp_path):
         shapes.unit("nope")
 
 
+def test_crop_gives_the_panel_its_aspect(photo, setup, petg, tmp_path, no_slicer):
+    """A square crop of a 4:3 photo makes a square picture, cut only once."""
+    res = forge.make(job(photo, setup, petg, tmp_path, width=60, crop=(0, 0, 100, 100)))
+    plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
+    assert plan["outer_mm"] == pytest.approx([60, 60])
+
+
+def test_arc_is_limited(setup, petg, tmp_path):
+    j = Job(photo=tmp_path / "x.png", setup=setup, optics=petg, shape="curved", arc=360)
+    with pytest.raises(ValueError, match="cylinder"):
+        j.check()
+
+
+def test_volume_counts_every_part(photo, setup, petg, tmp_path, no_slicer):
+    """Frame ring and hanging tab are plastic too."""
+    j = job(photo, setup, petg, tmp_path, shape="shaped", width=60, hole=True, pitch=0.5)
+    res = forge.make(j)
+    lay = res.layout
+    t, _ = forge.thickness_map(j, image.load(photo), lay)
+    parts = forge.volumes(j, lay, t)
+    assert res.volume_cm3 == pytest.approx(sum(m.volume() for _, m in parts) / 1000)
+    assert res.volume_cm3 > parts[0][1].volume() / 1000 * 1.1
+
+
+def test_lying_report_follows_the_view(photo, setup, petg, tmp_path, no_slicer):
+    res = forge.make(
+        job(photo, setup, petg, tmp_path, shape="shaped", width=50, pitch=0.5, view="relief")
+    )
+    text = res.files["report"].read_text(encoding="utf-8")
+    assert "relief side looks at you" in text
+    assert "that face is the one you look at" not in text
+
+
+def test_resolution_note_counts_one_copy(photo, setup, petg, tmp_path, no_slicer):
+    """A cylinder with --repeat 2 needs only half the photo's columns around."""
+    soft = "fewer pixels than the print grid"
+
+    def notes(repeat):
+        j = job(photo, setup, petg, tmp_path, shape="cylinder", diameter=40, pitch=0.5)
+        return " ".join(forge.make(replace(j, repeat=repeat)).notes)
+
+    assert soft in notes(1)  # about 250 columns around, the photo has 160
+    assert soft not in notes(2)
+
+
 def test_grid_gets_coarser_for_big_panels():
     rows, cols, pitch = forge.grid(200, 150, 0.2, 100_000)
     assert pitch > 0.2 and 2 * rows * cols <= 100_000 * 1.05

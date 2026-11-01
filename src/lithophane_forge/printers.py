@@ -24,6 +24,7 @@ class Printer:
     filaments: dict[str, str]  # material -> filament preset
     bed: tuple[float, float, float]  # x, y, max print height (fallback without the bundle)
     nozzle: float = 0.4
+    binary: bool = True  # the printer reads binary G-code (fallback without the bundle)
 
     def filament(self, material: str) -> str:
         return self.filaments[material]
@@ -67,6 +68,7 @@ PRINTERS: dict[str, Printer] = {
             "0.10mm DETAIL @MK3",
             {"petg": "Prusament PETG", "pla": "Prusament PLA"},
             (250, 210, 210),
+            binary=False,
         ),
         Printer(
             "coreone",
@@ -121,6 +123,8 @@ class Setup:
     layer: float
     first_layer: float
     binary_gcode: bool
+    model: str  # printer_model and printer_variant of the printer preset: what PrusaSlicer
+    variant: str  # must have installed to accept the presets (see slicer.datadir)
 
     def presets(self) -> dict[str, str]:
         return {
@@ -153,7 +157,8 @@ def setup(
         "filament": filament_preset or p.filament(material),
     }
     found = profiles.bundle()
-    bed, layer, first, binary = p.bed, 0.10, 0.20, True
+    bed, layer, first, binary = p.bed, 0.10, 0.20, p.binary
+    model, variant = p.model, f"{p.nozzle:g}"
     if found is not None:
         missing = [
             f"{kind} preset {name!r}" for kind, name in names.items() if not found.has(kind, name)
@@ -168,6 +173,18 @@ def setup(
         layer = float(print_.get("layer_height", layer))
         first = float(print_.get("first_layer_height", first))
         binary = printer.get("binary_gcode", "0") == "1"
+        model = printer.get("printer_model", model)
+        variant = printer.get("printer_variant", variant)
     return Setup(
-        p, material, names["printer"], names["print"], names["filament"], bed, layer, first, binary
+        p,
+        material,
+        names["printer"],
+        names["print"],
+        names["filament"],
+        bed,
+        layer,
+        first,
+        binary,
+        model,
+        variant,
     )

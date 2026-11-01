@@ -72,7 +72,11 @@ def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
     assert message in capsys.readouterr().err
 
 
-def test_bad_option_exits_with_2():
+@pytest.mark.parametrize(
+    "argv",
+    [["--printer", "nope"], ["--shape", "curved", "--arc", "400"]],
+)
+def test_bad_option_exits_with_2(argv):
     with pytest.raises(SystemExit) as e:
-        main(["make", "x.jpg", "--printer", "nope"])
+        main(["make", "x.jpg", *argv])
     assert e.value.code == 2
