@@ -36,7 +36,7 @@ def test_there_are_examples():
 def test_examples_parse(argv, monkeypatch, tmp_path, photo):
     """The documented commands parse and reach their handler (the work itself is skipped)."""
     calls = []
-    for name in ("cmd_make", "cmd_analyze", "cmd_printers"):
+    for name in ("cmd_make", "cmd_analyze", "cmd_calibrate", "cmd_printers"):
         monkeypatch.setattr(lithophane_forge, name, lambda a, n=name: calls.append(n) or 0)
     args = [str(photo) if a.endswith((".jpg", ".png")) else a for a in argv[1:]]
     assert main(args) == 0
@@ -80,3 +80,14 @@ def test_bad_option_exits_with_2(argv):
     with pytest.raises(SystemExit) as e:
         main(["make", "x.jpg", *argv])
     assert e.value.code == 2
+
+
+def test_calibrate_errors_exit_with_2(monkeypatch, capsys, tmp_path):
+    from lithophane_forge import calibrate
+
+    def fail(job):
+        raise ValueError("PrusaSlicer used other presets")
+
+    monkeypatch.setattr(calibrate, "make", fail)
+    assert main(["calibrate", "-o", str(tmp_path)]) == 2
+    assert "other presets" in capsys.readouterr().err

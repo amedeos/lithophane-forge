@@ -14,7 +14,9 @@ from .optics import Optics
 from .printers import Setup
 
 SHAPES = ("flat", "curved", "cylinder", "shaped")
+MODES = ("mono", "color")
 VIEWS = ("flat", "relief")
+COLOR_RANGE = (0.6, 3.0)  # mm: colour panels, from the thinnest stack to the frame
 STANDING = {"flat", "curved", "cylinder"}  # the others print lying on the bed
 DEFAULT_WIDTH = 100.0
 DEFAULT_DIAMETER = 80.0
@@ -33,6 +35,10 @@ class Job:
     out: Path = Path("out")
     name: str | None = None
     shape: str = "flat"
+    mode: str = "mono"  # "color": filament changes (M600), printed lying
+    colors: int = 4  # colour mode: number of filaments
+    filaments: Path | None = None  # colour mode: your own filaments instead of the catalog
+    color_range: tuple[float, float] = COLOR_RANGE
     width: float | None = None  # outer size in mm, frame included
     height: float | None = None
     arc: float = 120.0  # degrees, for shape="curved"
@@ -64,15 +70,40 @@ class Job:
 
     @property
     def frame_thickness(self) -> float:
-        return self.frame_t if self.frame_t is not None else round(self.optics.t_max + 0.8, 2)
+        if self.frame_t is not None:
+            return self.frame_t
+        if self.mode == "color":  # the whole stack: the frame shows the darkest colour
+            return self.color_range[1]
+        return round(self.optics.t_max + 0.8, 2)
 
     @property
     def standing(self) -> bool:
-        return self.shape in STANDING
+        return self.shape in STANDING and self.mode == "mono"
 
     def check(self) -> None:
         if self.shape not in SHAPES:
             raise ValueError(f"unknown shape {self.shape!r}; choose from {', '.join(SHAPES)}")
+        if self.mode not in MODES:
+            raise ValueError(f"unknown mode {self.mode!r}; choose from {', '.join(MODES)}")
+        if self.mode == "color":
+            if self.shape not in ("flat", "shaped"):
+                raise ValueError("colour panels print lying: use --shape flat or shaped")
+            if not 2 <= self.colors <= 8:
+                raise ValueError("--colors must be between 2 and 8")
+            lo, hi = self.color_range
+            if not 0.3 <= lo < hi:
+                raise ValueError(f"colour thickness range {lo}..{hi} mm is not valid")
+            from .palette import heights
+
+            n = len(heights(lo, hi, self.setup.first_layer, self.setup.layer))
+            if n < max(self.colors, 2):
+                raise ValueError(
+                    f"the colour range {lo:g} to {hi:g} mm holds {n} layer tops of "
+                    f"{self.setup.layer:g} mm; {self.colors} colours need at least "
+                    f"{max(self.colors, 2)}: widen --t-min/--t-max"
+                )
+            if self.tone.invert or self.tone.clahe > 0:
+                raise ValueError("--invert and --clahe work in mono mode only")
         if self.hole and self.shape not in ("flat", "shaped"):
             raise ValueError("--hole works with the flat and shaped panels")
         if self.stand and self.shape != "flat":
@@ -116,6 +147,8 @@ class Result:
     notes: list[str] = field(default_factory=list)
     sliced: dict[str, dict] = field(default_factory=dict)  # part -> PrusaSlicer summary
     accessories: dict[str, dict] = field(default_factory=dict)
+    colour: object = None  # palette.Plan in colour mode
+    colour_changes: list[tuple[float, str]] = field(default_factory=list)
 
 
 def grid(
@@ -197,6 +230,48 @@ def thickness_map(job: Job, rgb: np.ndarray, lay: Layout) -> tuple[np.ndarray, n
     return t, photo
 
 
+@dataclass
+class ColourMap:
+    plan: object  # palette.Plan
+    t_view: np.ndarray  # heights, as the viewer sees them (row 0 at the top)
+    ideal: np.ndarray  # simulated print with the ideal colours (linear RGB)
+    real: np.ndarray  # simulated print with the chosen filaments
+    photo: np.ndarray
+
+
+def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
+    """Colour mode: the filaments, the change heights and the height of every grid point."""
+    from scipy.ndimage import median_filter
+
+    from . import palette
+
+    u = np.linspace(0, lay.width, lay.cols)
+    v = np.linspace(lay.height, 0, lay.rows)
+    u0, u1, v0, v1 = lay.photo_box
+    in_u = (u >= u0 - 1e-9) & (u <= u1 + 1e-9)
+    in_v = (v >= v0 - 1e-9) & (v <= v1 + 1e-9)
+    ci, ri = int(in_u.sum()), int(in_v.sum())
+    photo = image.frame(rgb, (u1 - u0) / (v1 - v0), job.crop)
+    target = palette.target(image.resize(photo, ri, ci), job.tone.levels, job.tone.gamma)
+    lo, hi = job.color_range
+    h = palette.heights(lo, hi, job.setup.first_layer, job.setup.layer)
+    choices = palette.load_filaments(job.filaments)
+    source = str(job.filaments) if job.filaments else "Prusament PETG (Prusa's TD table)"
+    plan = palette.plan(target, job.colors, h, choices, source)
+    real_idx = median_filter(palette.assign(target, palette.lab(plan.real.colours)), size=3)
+    ideal_idx = palette.assign(target, palette.lab(plan.ideal.colours))
+    r0, c0 = int(np.argmax(in_v)), int(np.argmax(in_u))
+    t = np.full((lay.rows, lay.cols), job.frame_thickness)
+    t[r0 : r0 + ri, c0 : c0 + ci] = h[real_idx]
+
+    def sim(fit, idx):
+        out = np.broadcast_to(fit.colours[-1], (lay.rows, lay.cols, 3)).copy()
+        out[r0 : r0 + ri, c0 : c0 + ci] = fit.colours[idx]
+        return out
+
+    return ColourMap(plan, t, sim(plan.ideal, ideal_idx), sim(plan.real, real_idx), photo)
+
+
 def limit_overhangs(t_view: np.ndarray, angle: float, dz: float) -> np.ndarray:
     """Thicken the plastic under thick parts so that the relief side never leans out more
     than `angle` degrees from vertical (the panel prints standing, row 0 at the top).
@@ -226,17 +301,23 @@ def volumes(job: Job, lay: Layout, t_view: np.ndarray) -> list[tuple[str, mesh.M
     below, so left and right swap."""
     t = np.flipud(t_view)  # the mesh grid has row 0 at the bottom
     w, h, ft = lay.width, lay.height, job.frame_thickness
-    if job.shape == "shaped":
+    if not job.standing:  # shaped panels and colour panels lie on the bed
+        from shapely.geometry import box
+
         from . import accessories, shapes
 
-        f = job.frame
-        cells = shapes.cells_inside(lay.outline.buffer(-f / 2), w, h, lay.rows, lay.cols)
-        parts = [
-            ("lithophane", mesh.lying_masked(t, cells, w, h)),
-            ("frame", accessories.frame_ring(lay.outline, f, ft)),
-        ]
+        if job.shape == "shaped":
+            f = job.frame
+            cells = shapes.cells_inside(lay.outline.buffer(-f / 2), w, h, lay.rows, lay.cols)
+            parts = [
+                ("lithophane", mesh.lying_masked(t, cells, w, h)),
+                ("frame", accessories.frame_ring(lay.outline, f, ft)),
+            ]
+        else:
+            parts = [("lithophane", mesh.lying(t, w, h))]
         if job.hole:
-            parts.append(("hanging tab", accessories.tab(lay.outline, ft)))
+            outline = lay.outline if lay.outline is not None else box(-w / 2, 0, w / 2, h)
+            parts.append(("hanging tab", accessories.tab(outline, ft)))
         if job.view == "flat":  # seen from the bed side
             parts = [(n, _mirror_x(m)) for n, m in parts]
         return parts
@@ -337,11 +418,23 @@ def make(job: Job) -> Result:
             f"{job.max_triangles:,} triangles); raise --max-triangles for more "
             "detail"
         )
-    t_view, photo = thickness_map(job, rgb, lay)
+    cmap = None
+    if job.mode == "color":
+        cmap = colour_map(job, rgb, lay)
+        t_view, photo = cmap.t_view, cmap.photo
+        res.colour = cmap.plan
+        res.colour_changes = cmap.plan.real.colour_changes(job.setup.layer)
+        res.notes += colour_notes(job, cmap.plan)
+    else:
+        t_view, photo = thickness_map(job, rgb, lay)
     if job.standing:
         t_view = limit_overhangs(t_view, job.max_overhang, lay.height / (lay.rows - 1))
     in_v, in_u, copies = picture_cells(job, lay)  # the grid one copy of the photo fills
-    res.notes += image.analyse(photo, (int(in_v.sum()), math.ceil(in_u.sum() / copies))).notes
+    res.notes += [
+        n
+        for n in image.analyse(photo, (int(in_v.sum()), math.ceil(in_u.sum() / copies))).notes
+        if not (cmap and "colourful" in n)
+    ]
     if job.shape == "cylinder":
         res.notes += cylinder_notes(job, lay, cropped.shape[1] / cropped.shape[0])
     parts = place(volumes(job, lay, t_view), job.setup.bed, BRIM if job.standing else 0.0)
@@ -362,18 +455,23 @@ def make(job: Job) -> Result:
         mask = np.flipud(shapes.points_inside(lay.outline, *dims))
         inner = np.flipud(shapes.points_inside(lay.outline.buffer(-job.frame), *dims))
         t_seen = np.where(inner, t_view, job.frame_thickness)
-    lit = render.backlit(t_seen, job.optics, mask=mask)
-    res.files["preview"] = render.sheet(
-        [
+    if cmap is None:
+        lit = render.backlit(t_seen, job.optics, mask=mask)
+        unrolled = ", unrolled" if job.shape == "cylinder" else ""
+        panels = [
             ("photo", render._u8(photo)),
-            (
-                "lit from behind (simulated)" + (", unrolled" if job.shape == "cylinder" else ""),
-                lit,
-            ),
+            ("lit from behind (simulated)" + unrolled, lit),
             relief_panel(job, t_seen, lay.pitch, mask),
-        ],
-        folder / "preview.png",
-    )
+        ]
+    else:
+        lit = render.colour(cmap.real, mask)
+        panels = [
+            ("photo", render._u8(photo)),
+            ("ideal colours (simulated)", render.colour(cmap.ideal, mask)),
+            ("suggested filaments (simulated)", lit),
+            ("filament changes", render.palette_strip(cmap.plan, job.setup.layer)),
+        ]
+    res.files["preview"] = render.sheet(panels, folder / "preview.png")
     res.files["stl"] = folder / f"{job.stem}.stl"
     mesh.write_stl(whole, res.files["stl"])
     projects = {}
@@ -381,6 +479,7 @@ def make(job: Job) -> Result:
     threemf.write(
         project,
         [threemf.Part(job.stem, [threemf.Volume(n, m) for n, m in parts], object_settings(job))],
+        colour_changes=res.colour_changes,
         thumbnail=render.thumbnail(lit),
     )
     res.files["3mf"] = projects["lithophane"] = project
@@ -412,6 +511,28 @@ def make(job: Job) -> Result:
             res.sliced[name] = slice_project(job, cmd, path, res, name)
     write_plan(job, res)
     return res
+
+
+def colour_notes(job: Job, plan) -> list[str]:
+    notes = []
+    if plan.real.mean_de > 15:
+        notes.append(
+            f"the print will differ from the photo (mean Delta E {plan.real.mean_de:.0f}):"
+            " one extruder can only follow one path of colours, from light to dark, "
+            "and this photo's colours do not lie on one path; see preview.png, or try "
+            "--colors with one more filament"
+        )
+    if len(plan.real.filaments) < job.colors:
+        notes.append(
+            f"{len(plan.real.filaments)} filaments are enough for this photo (you asked for "
+            f"{job.colors}): more changes would not bring it closer"
+        )
+    if job.setup.material != "petg" and job.filaments is None:
+        notes.append(
+            "the suggested filaments come from the Prusament PETG table; pass "
+            "--filaments with your own list for another material"
+        )
+    return notes
 
 
 def cylinder_notes(job: Job, lay: Layout, photo_aspect: float) -> list[str]:
@@ -456,12 +577,39 @@ def slice_project(job: Job, cmd: list[str], project: Path, res: Result, name: st
     return info
 
 
+def colour_plan(res: Result) -> dict | None:
+    """The colour mode's decisions, for plan.json."""
+    if res.colour is None:
+        return None
+    p = res.colour
+
+    def fit(f):
+        return {
+            "filaments": [
+                {"name": x.name, "hex": x.hex, "td": x.td, "from_mm": round(z, 3)}
+                for x, z in zip(f.filaments, f.starts)
+            ],
+            "mean_delta_e": round(f.mean_de, 2),
+            "p95_delta_e": round(f.p95_de, 2),
+        }
+
+    return {
+        "ideal": fit(p.ideal),
+        "print": fit(p.real),
+        "source": p.source,
+        "closest": [  # per ideal colour: the closest filament by colour alone
+            {"ideal": i.hex, "filament": f.name, "hex": f.hex, "delta_e": round(d, 1)}
+            for i, (f, d) in zip(p.ideal.filaments, p.matches)
+        ],
+    }
+
+
 def write_plan(job: Job, res: Result) -> None:
     """plan.json (everything, for tools and tests) and report.md (for people)."""
     s, lay = job.setup, res.layout
     plan = {
         "photo": str(job.photo),
-        "mode": "mono",
+        "mode": job.mode,
         "shape": job.shape,
         "pose": "standing" if job.standing else "lying",
         "outer_mm": [round(lay.width, 2), round(lay.height, 2)],
@@ -475,7 +623,8 @@ def write_plan(job: Job, res: Result) -> None:
         "max_overhang_deg": job.max_overhang if job.standing else None,
         "grid": [lay.rows, lay.cols],
         "pitch_mm": round(lay.pitch, 4),
-        "optics": asdict(job.optics),
+        "optics": asdict(job.optics) if job.mode == "mono" else None,
+        "color_range_mm": list(job.color_range) if job.mode == "color" else None,
         "tone": asdict(job.tone),
         "printer": {
             "key": s.printer.key,
@@ -490,7 +639,8 @@ def write_plan(job: Job, res: Result) -> None:
         "triangles": res.triangles,
         "volume_cm3": round(res.volume_cm3, 2),
         "accessories": res.accessories,
-        "colour_changes": [],
+        "colour": colour_plan(res),
+        "colour_changes": [[z, c] for z, c in res.colour_changes],
         "sliced": res.sliced,
         "files": {k: p.name for k, p in res.files.items()},
         "notes": res.notes,
@@ -502,8 +652,46 @@ def write_plan(job: Job, res: Result) -> None:
     res.files["report"].write_text(report(job, res), encoding="utf-8")
 
 
+def colour_report(job: Job, res: Result) -> list[str]:
+    p = res.colour
+    first = p.real.filaments[0]
+    lines = [f"- Load **{first.name}** ({first.hex}) before you start."]
+    for (z, _), f in zip(res.colour_changes, p.real.filaments[1:]):
+        lines.append(f"- At Z {z:.2f} mm the printer stops (M600): load **{f.name}** ({f.hex}).")
+    lines += [
+        (
+            f"- With these filaments the print is a mean Delta E {p.real.mean_de:.1f} away from "
+            f"the photo (95 % of it within {p.real.p95_de:.0f}); the ideal colours, fitted to "
+            f"the photo alone, give {p.ideal.mean_de:.1f}."
+        ),
+        "",
+        "## Ideal colours",
+        "",
+        (
+            "The colours that suit this photo best, whatever filaments exist, and the closest "
+            "filament to each. The print above uses the filaments that bring the whole "
+            "picture closest to the photo, which can differ from the closest colours."
+        ),
+        "",
+        "| # | Ideal colour | Ideal TD (mm) | Closest filament | Delta E |",
+        "|---|---|---|---|---|",
+    ]
+    for k, (i, (f, d)) in enumerate(zip(p.ideal.filaments, p.matches), start=1):
+        lines.append(f"| {k} | {i.hex} | {i.td:g} | {f.name} ({f.hex}, TD {f.td:g}) | {d:.0f} |")
+    lines += [
+        "",
+        (
+            f"Filaments from: {p.source}. TD is the thickness that lets about 10 % of the "
+            "light through; a small TD is an opaque filament."
+        ),
+        "",
+    ]
+    return lines
+
+
 def report(job: Job, res: Result) -> str:
-    s, o, lay = job.setup, job.optics, res.layout
+    s, lay = job.setup, res.layout
+    t_min, t_max = job.color_range if job.mode == "color" else (job.optics.t_min, job.optics.t_max)
     what = {
         "flat": "flat panel",
         "curved": f"curved panel ({job.arc:g}° arc)",
@@ -515,8 +703,8 @@ def report(job: Job, res: Result) -> str:
         "",
         (
             f"Lithophane from `{job.photo.name}`: {what[job.shape]}, {lay.width:.1f} x "
-            f"{lay.height:.1f} mm (frame {job.frame:g} mm), thickness {o.t_min:g} to "
-            f"{o.t_max:g} mm."
+            f"{lay.height:.1f} mm (frame {job.frame:g} mm), thickness {t_min:g} to "
+            f"{t_max:g} mm."
         ),
         "",
         "## Print",
@@ -526,12 +714,15 @@ def report(job: Job, res: Result) -> str:
             f"`{s.filament_preset}`."
         ),
         (
-            f"- Use **white** {s.material.upper()}. Open `{job.stem}.3mf` in PrusaSlicer: the "
-            "object has its own settings ("
+            f"- Open `{job.stem}.3mf` in PrusaSlicer: the object has its own settings ("
             + ", ".join(f"{k} {v}" for k, v in object_settings(job).items())
             + ")."
         ),
     ]
+    if job.mode == "color":
+        lines += colour_report(job, res)
+    else:
+        lines.append(f"- Use **white** {s.material.upper()}.")
     if job.standing:
         lines.append("- It prints standing, with a brim. Remove the brim with care.")
     else:

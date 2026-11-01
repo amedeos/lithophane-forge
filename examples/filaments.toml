@@ -1,0 +1,49 @@
+# Example list for --filaments: the filaments on the owner's shelf (from the 3d-linux
+# project). The hex values are close to Prusament PETG. The td values are estimates taken
+# from the closest Prusament PETG colour in Prusa's TD table; measure your own spools
+# for better results (td = mm of filament that let about 10 % of the light through).
+
+[[filament]]
+name = "white"
+hex = "#ECE8DC"
+td = 3.4
+
+[[filament]]
+name = "black"
+hex = "#1C1A1E"
+td = 0.3
+
+[[filament]]
+name = "red"
+hex = "#C62127"
+td = 2.6
+
+[[filament]]
+name = "yellow gold"
+hex = "#E8B10E"
+td = 2.6
+
+[[filament]]
+name = "green"
+hex = "#3E9B35"
+td = 0.5
+
+[[filament]]
+name = "orange"
+hex = "#F07318"
+td = 6.2
+
+[[filament]]
+name = "violet"
+hex = "#5E4A9C"
+td = 1.0
+
+[[filament]]
+name = "grey"
+hex = "#7B7C80"
+td = 0.5
+
+[[filament]]
+name = "blue"
+hex = "#1F6FD1"
+td = 3.0

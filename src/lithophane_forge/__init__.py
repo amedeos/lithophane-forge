@@ -13,7 +13,10 @@ examples:
   lithophane-forge make photo.jpg --shape curved --height 100 --arc 110
   lithophane-forge make photo.jpg --shape cylinder --diameter 80 --repeat 2 --lamp-base
   lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
+  lithophane-forge make photo.jpg --mode color --colors 4 --width 120 --slice
+  lithophane-forge analyze photo.jpg --colors 4
   lithophane-forge make photo.jpg --printer coreone --material pla --slice
+  lithophane-forge calibrate --slice
   lithophane-forge printers
 """
 
@@ -48,7 +51,7 @@ def _levels(text: str) -> tuple[float, float]:
 
 
 def parser() -> argparse.ArgumentParser:
-    from .forge import SHAPES, VIEWS
+    from .forge import MODES, SHAPES, VIEWS
     from .printers import DEFAULT_MATERIAL, DEFAULT_PRINTER, MATERIALS, PRINTERS
 
     p = argparse.ArgumentParser(
@@ -62,6 +65,12 @@ def parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("analyze", help="check a photo and get advice before printing")
     a.add_argument("photo", type=Path)
+    a.add_argument(
+        "--colors",
+        type=_number(int, 2),
+        help="also find the ideal colours for a colour print with this many filaments",
+    )
+    a.add_argument("--filaments", type=Path, help="your filaments (TOML) instead of the catalog")
 
     m = sub.add_parser(
         "make",
@@ -71,6 +80,12 @@ def parser() -> argparse.ArgumentParser:
     m.add_argument("photo", type=Path)
     size = m.add_argument_group("size and shape")
     size.add_argument("--shape", choices=SHAPES, default="flat")
+    size.add_argument(
+        "--mode",
+        choices=MODES,
+        default="mono",
+        help="mono: white filament; color: filament changes (M600), printed lying",
+    )
     size.add_argument(
         "--width",
         type=_number(float, 10),
@@ -163,6 +178,16 @@ def parser() -> argparse.ArgumentParser:
     extra.add_argument(
         "--led-height", type=_number(float, 5), default=18.0, help="LED pocket height, mm"
     )
+    col = m.add_argument_group("colour mode")
+    col.add_argument(
+        "--colors", type=_number(int, 2), default=4, help="number of filaments (2 to 8)"
+    )
+    col.add_argument(
+        "--filaments",
+        type=Path,
+        help="TOML file with your filaments ([[filament]] name, hex, td) instead of the "
+        "Prusament PETG catalog",
+    )
     prn = m.add_argument_group("printer")
     prn.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
     prn.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
@@ -178,13 +203,21 @@ def parser() -> argparse.ArgumentParser:
     out.add_argument("-o", "--out", type=Path, default=Path("out"), help="output folder")
     out.add_argument("--name", help="name of the files (default: the photo's name)")
 
+    c = sub.add_parser(
+        "calibrate", help="make a strip of known thicknesses to measure your filament"
+    )
+    c.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
+    c.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
+    c.add_argument("--slice", action="store_true", help="also write the G-code")
+    c.add_argument("-o", "--out", type=Path, default=Path("out"), help="output folder")
+
     sub.add_parser("printers", help="list the printers and check their presets")
     return p
 
 
 def job_from(args: argparse.Namespace):
     from . import image, optics, printers
-    from .forge import Job
+    from .forge import COLOR_RANGE, Job
 
     try:
         setup = printers.setup(
@@ -194,13 +227,20 @@ def job_from(args: argparse.Namespace):
             args.print_preset,
             args.filament_preset,
         )
-        opt = optics.optics(args.material, args.t_min, args.t_max, args.td)
+        mono = args.mode == "mono"
+        opt = optics.optics(
+            args.material, args.t_min if mono else None, args.t_max if mono else None, args.td
+        )
         crop = image.parse_crop(args.crop) if args.crop else None
     except ValueError as e:
         raise UsageError(str(e)) from None
     if not args.photo.is_file():
         raise UsageError(f"no such photo: {args.photo}")
+    if args.filaments and not args.filaments.is_file():
+        raise UsageError(f"no such filament list: {args.filaments}")
     tone = image.Tone(levels=args.levels, gamma=args.gamma, clahe=args.clahe, invert=args.invert)
+    lo, hi = COLOR_RANGE
+    color_range = (args.t_min or lo, args.t_max or hi)
     return Job(
         photo=args.photo,
         setup=setup,
@@ -208,6 +248,10 @@ def job_from(args: argparse.Namespace):
         out=args.out,
         name=args.name,
         shape=args.shape,
+        mode=args.mode,
+        colors=args.colors,
+        filaments=args.filaments,
+        color_range=color_range,
         width=args.width,
         height=args.height,
         arc=args.arc,
@@ -248,6 +292,8 @@ def cmd_make(args) -> int:
     )
     s = job.setup
     print(f"printer: {s.printer_preset} | {s.print_preset} | {s.filament_preset}")
+    if res.colour is not None:
+        print_colour(res.colour, res.colour_changes)
     for name, info in res.sliced.items():
         print(f"PrusaSlicer, {name}: {info['time']}, {info['filament_g']} g")
     for note in res.notes:
@@ -257,12 +303,28 @@ def cmd_make(args) -> int:
     return 0
 
 
+def print_colour(plan, changes) -> None:
+    print(
+        "ideal colours, from the bed up:",
+        ", ".join(f"{f.hex} (TD {f.td:g})" for f in plan.ideal.filaments),
+        f"-> mean Delta E {plan.ideal.mean_de:.1f}",
+    )
+    print(f"suggested filaments ({plan.source}):")
+    print(f"  start with {plan.real.filaments[0].name} {plan.real.filaments[0].hex}")
+    for (z, _), f in zip(changes, plan.real.filaments[1:]):
+        print(f"  M600 at Z {z:.2f} mm: {f.name} {f.hex}")
+    print(f"  -> mean Delta E {plan.real.mean_de:.1f}, 95 % within {plan.real.p95_de:.0f}")
+
+
 def cmd_analyze(args) -> int:
     from . import image
 
     if not args.photo.is_file():
         raise UsageError(f"no such photo: {args.photo}")
-    a = image.analyse(image.load(args.photo))
+    if args.filaments and not args.filaments.is_file():
+        raise UsageError(f"no such filament list: {args.filaments}")
+    rgb = image.load(args.photo)
+    a = image.analyse(rgb)
     print(f"{args.photo.name}: {a.size[0]} x {a.size[1]} px")
     print(
         f"lightness L*: mean {a.mean_lstar:.0f}, 1%..99% {a.p1_lstar:.0f}..{a.p99_lstar:.0f}"
@@ -274,6 +336,52 @@ def cmd_analyze(args) -> int:
     )
     for note in a.notes or ["looks fine for a lithophane"]:
         print(f"- {note}")
+    if args.colors:
+        from . import palette, printers
+        from .forge import COLOR_RANGE
+
+        if not 2 <= args.colors <= 8:
+            raise UsageError("--colors must be between 2 and 8")
+        s = printers.setup()
+        small = image.resize(rgb, 240, max(1, round(240 * rgb.shape[1] / rgb.shape[0])))
+        h = palette.heights(*COLOR_RANGE, s.first_layer, s.layer)
+        try:
+            choices = palette.load_filaments(args.filaments)
+        except ValueError as e:
+            raise UsageError(str(e)) from None
+        source = str(args.filaments) if args.filaments else "Prusament PETG (Prusa's TD table)"
+        plan = palette.plan(palette.target(small), args.colors, h, choices, source)
+        n = len(plan.real.filaments)
+        print(f"colour print with {n} of {args.colors} filaments ({s.printer.title} layers):")
+        print_colour(plan, plan.real.colour_changes(s.layer))
+    return 0
+
+
+def cmd_calibrate(args) -> int:
+    from . import calibrate, optics, printers
+
+    try:
+        setup = printers.setup(args.printer, args.material)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+    job = calibrate.default_job(setup, optics.DEFAULTS[args.material], args.out, slice_=args.slice)
+    try:
+        res = calibrate.make(job)
+    except ValueError as e:  # for example PrusaSlicer took other presets
+        raise UsageError(str(e)) from None
+    sx, sy, sz = res.size
+    print(
+        f"{job.stem}: {sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, steps "
+        + ", ".join(f"{v:g}" for v in calibrate.STEPS)
+        + " mm"
+    )
+    for info in res.sliced.values():
+        print(f"PrusaSlicer: {info['time']}, {info['filament_g']} g")
+    for note in res.notes:
+        print(f"note: {note}")
+    for kind, path in res.files.items():
+        print(f"{kind:16s} {path}")
+    print(f"then read {res.files['report']} to measure t_min, t_max and td")
     return 0
 
 
@@ -304,7 +412,12 @@ def cmd_printers(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    handler = {"make": cmd_make, "analyze": cmd_analyze, "printers": cmd_printers}[args.command]
+    handler = {
+        "make": cmd_make,
+        "analyze": cmd_analyze,
+        "calibrate": cmd_calibrate,
+        "printers": cmd_printers,
+    }[args.command]
     try:
         return handler(args)
     except UsageError as e:
