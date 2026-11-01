@@ -6,8 +6,9 @@ Turn a photo into a 3D-printable lithophane, with a ready-to-print PrusaSlicer p
 
 - The photo's lightness is cleaned up (levels, optional local contrast, gamma) and turned into the light you want to see.
 - Light through plastic falls off exponentially (Beer-Lambert), so each point gets the thickness that lets the right amount of light through: thin is bright, thick is dark.
-- numpy turns the thickness map into a closed mesh with a frame: a flat panel, or a curved one that stands on its own.
-- Under every thick part, the plastic slopes down at no more than 60° from vertical, so the panel prints standing without supports.
+- numpy turns the thickness map into a closed mesh with a frame: a flat panel, a curved one that stands on its own, a cylinder for a lamp, or a shaped panel (heart, oval, circle, or your own outline).
+- Flat, curved and cylinder panels print standing, for the finest detail. Under every thick part, the plastic slopes down at no more than 60° from vertical, so they print without supports. Shaped panels print lying on the bed, so their outline needs no support either.
+- build123d makes the plain parts: the frame of a shaped panel, a hanging tab, a stand for flat panels and a lamp base with a pocket for an LED.
 - The 3MF is a PrusaSlicer project: the printer, print and filament presets are the official Prusa ones, and the object carries its own settings (100 % infill, enough perimeters, rear seam, brim).
 - With `--slice` you also get the G-code (binary `.bgcode` on the MK4), ready for the printer.
 
@@ -21,6 +22,10 @@ uv sync
 uv run lithophane-forge analyze photo.jpg                 # advice before printing
 uv run lithophane-forge make photo.jpg --width 120        # flat panel, MK4, white PETG
 uv run lithophane-forge make photo.jpg --shape curved --height 100 --arc 110
+uv run lithophane-forge make photo.jpg --width 120 --stand --hole
+uv run lithophane-forge make photo.jpg --shape cylinder --diameter 80 --repeat 2 --lamp-base
+uv run lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
+uv run lithophane-forge make photo.jpg --shape shaped --mask outline.svg --width 100
 uv run lithophane-forge make photo.jpg --printer mk4s --slice
 uv run lithophane-forge make photo.jpg --height 80 --gamma 0.8 --clahe 0.01
 uv run lithophane-forge printers                          # supported printers and presets
@@ -34,14 +39,19 @@ Everything goes to `out/<name>/`, where `<name>` is the photo's name (or `--name
 |---|---|
 | `<name>.3mf` | PrusaSlicer project: model, presets, per-object settings, thumbnail |
 | `<name>.bgcode` | G-code for the printer (only with `--slice`; `.gcode` on printers without binary G-code) |
-| `<name>.stl` | The bare mesh, for other slicers |
+| `<name>.stl` | The bare mesh, for other slicers (frame and tab are separate shells that overlap the panel) |
+| `<name>-stand.3mf`, `<name>-lamp-base.3mf` | The accessories, as their own projects (with `--stand` or `--lamp-base`), plus STL files |
 | `preview.png` | The photo, the lit panel (simulated) and the relief side |
 | `report.md` | What to print with, and how to light it |
 | `plan.json` | Every parameter and result, for tools |
 
 ## Options
 
-- **Size and shape:** `--width` and `--height` are the outer size in mm, frame included; give one and the photo sets the other, or both to crop the photo. `--shape curved` bends the panel on an arc of `--arc` degrees (the width is the arc length). `--frame` sets the frame width (0 for none).
+- **Size and shape:** `--width` and `--height` are the outer size in mm, frame included; give one and the photo sets the other, or both to crop the photo. `--frame` sets the frame width (0 for none).
+- **Curved:** `--shape curved` bends the panel on an arc of `--arc` degrees (the width is the arc length on the outside).
+- **Cylinder:** `--shape cylinder --diameter D --height H` (the height is 1.25 × the diameter if you leave it out). The picture goes once around; a normal photo then loses its top and bottom, so `--repeat 2` puts it around twice (the tool suggests the best number). `--lamp-base` adds a base with a pocket for an LED tealight or puck light (`--led-diameter`, `--led-height`) and a notch for a cable.
+- **Shaped:** `--shape shaped --mask heart|oval|circle`, or `--mask` with an SVG file (its largest closed shape) or a PNG file (dark pixels are the shape). An oval takes the photo's proportions, a circle stays round. The frame follows the outline.
+- **Extras:** `--hole` adds a hanging tab with a 5 mm hole (flat and shaped panels); `--stand` makes a stand with a slot for a flat panel.
 - **Picture:** `--crop X,Y,W,H` (photo pixels), `--levels LOW,HIGH` (percentiles that become black and white), `--gamma`, `--clahe` (local contrast), `--invert`, `--view relief` (the relief faces the viewer instead of the flat face).
 - **Thickness:** `--t-min`, `--t-max` and `--td` (mm of your filament that let 10 % of the light through). The defaults for white PETG (0.8, 3.6 and 2.3 mm) are estimates: calibrate your spool for the best result.
 - **Printer:** `--printer` (`mk4`, `mk4s`, `mk3.5`, `mk3s`, `coreone`, `coreonel`, `xl`, `mini`), `--material petg|pla`, or your own presets with `--printer-preset`, `--print-preset` and `--filament-preset`.
@@ -50,13 +60,14 @@ Everything goes to `out/<name>/`, where `<name>` is the photo's name (or `--name
 ## Printing
 
 - Use white filament. PETG lets more light through than PLA, so its thickness range is wider.
-- The panel prints standing with a brim. On the MK4, print PETG on the textured sheet, or use a release agent on the smooth sheet, and keep the filament dry.
+- Standing panels print with a brim. Shaped panels print lying, flat face down: that face is the one you look at, so a smooth or satin sheet gives the cleanest result.
+- On the MK4, print PETG on the textured sheet, or use a release agent on the smooth sheet, and keep the filament dry.
+- Print the stand and the lamp base in any opaque colour; they use 0.2 mm layers.
 - Light it from behind with a diffuse, neutral white LED (about 4000 K). By default the flat face looks at you.
 
 ## Coming next
 
 - Colour lithophanes with filament changes (M600): the tool finds the ideal colours for the photo, the heights of the changes, and the closest real PETG filaments.
-- Cylinder lamps and shaped panels (heart, oval, circle, your own outline), a stand, a hanging hole and a lamp base made with build123d.
 - A calibration print to measure your filament.
 
 ## Development

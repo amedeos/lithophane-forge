@@ -187,6 +187,79 @@ def arc(t: np.ndarray, width: float, height: float, radius: float, wrap: bool = 
     return shell(front, back, wrap)
 
 
+def connect_diagonals(cells: np.ndarray) -> np.ndarray:
+    """Fill the 2 x 2 blocks where two cells touch only at a corner.
+
+    Such a corner would belong to two separate fans of triangles (a non-manifold vertex);
+    with the two missing cells added, the region around it is whole again."""
+    cells = cells.copy()
+    while True:
+        a, b = cells[:-1, :-1], cells[:-1, 1:]
+        c, d = cells[1:, :-1], cells[1:, 1:]
+        bad = (a & d & ~b & ~c) | (b & c & ~a & ~d)
+        if not bad.any():
+            return cells
+        i, j = np.nonzero(bad)
+        for di in (0, 1):
+            for dj in (0, 1):
+                cells[i + di, j + dj] = True
+
+
+def masked(front: np.ndarray, back: np.ndarray, cells: np.ndarray) -> Mesh:
+    """Closed mesh of the grid cells where `cells` is true (an (nr-1, nc-1) array).
+
+    Both faces are full grids over the cells; walls close every boundary edge. Use
+    `connect_diagonals` first, so that every corner is manifold."""
+    nr, nc = front.shape[:2]
+    if cells.shape != (nr - 1, nc - 1) or not cells.any():
+        raise ValueError("no grid cells to mesh")
+    used = np.zeros((nr, nc), bool)
+    for di in (0, 1):
+        for dj in (0, 1):
+            used[di : nr - 1 + di, dj : nc - 1 + dj] |= cells
+    n = int(used.sum())
+    fidx = np.full((nr, nc), -1)
+    fidx[used] = np.arange(n)
+    bidx = np.where(used, fidx + n, -1)
+    verts = np.concatenate([front[used], back[used]])
+
+    i, j = np.nonzero(cells)
+
+    def corners(idx):
+        return idx[i, j], idx[i, j + 1], idx[i + 1, j + 1], idx[i + 1, j]
+
+    a, b, c, d = corners(fidx)
+    tris = [np.stack([a, b, c], -1), np.stack([a, c, d], -1)]
+    a, b, c, d = corners(bidx)
+    tris += [np.stack([a, c, b], -1), np.stack([a, d, c], -1)]
+    pad = np.pad(cells, 1)  # neighbours outside the grid are empty
+    pi, pj = i + 1, j + 1
+    # the four edges of a cell, counterclockwise, and the neighbour across each edge
+    edges = [
+        ((i, j), (i, j + 1), pad[pi - 1, pj]),
+        ((i, j + 1), (i + 1, j + 1), pad[pi, pj + 1]),
+        ((i + 1, j + 1), (i + 1, j), pad[pi + 1, pj]),
+        ((i + 1, j), (i, j), pad[pi, pj - 1]),
+    ]
+    for (p0, p1), (q0, q1), neighbour in [
+        ((e[0][0], e[0][1]), (e[1][0], e[1][1]), e[2]) for e in edges
+    ]:
+        edge = ~neighbour
+        fp, fq = fidx[p0[edge], p1[edge]], fidx[q0[edge], q1[edge]]
+        bp, bq = bidx[p0[edge], p1[edge]], bidx[q0[edge], q1[edge]]
+        tris += [np.stack([bp, bq, fq], -1), np.stack([bp, fq, fp], -1)]
+    mesh = Mesh(verts, np.concatenate(tris).astype(np.int64))
+    return mesh if mesh.volume() > 0 else mesh.flipped()
+
+
+def lying_masked(t: np.ndarray, cells: np.ndarray, width: float, height: float) -> Mesh:
+    """Like `lying`, but only over the given grid cells (a shaped panel)."""
+    u, v = _grid(t, width, height)
+    front = np.stack([u, v, t], -1)
+    back = np.stack([u, v, np.zeros_like(t)], -1)
+    return masked(front, back, connect_diagonals(cells))
+
+
 def write_stl(mesh: Mesh, path: Path, name: str = "lithophane-forge") -> None:
     """Binary STL."""
     tri = mesh.triangles().astype(np.float32)

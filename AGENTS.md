@@ -8,7 +8,7 @@ Guidance for coding agents working in this repository.
 
 - **Printer:** Prusa MK4 (Input Shaper firmware) with **one extruder**: no MMU. Colours come only from M600 colour changes by layer height. Other Prusa printers are in `printers.PRINTERS`.
 - **Material:** **PETG** by default (`--material pla` for PLA). The thickness defaults in `optics.DEFAULTS` are estimates until the owner calibrates a spool.
-- **Modes:** mono (white filament, printed **standing**, thickness along y) is done. Colour (M600 changes, printed **lying**, thickness along z, backlit, ideal colours found from the photo and then matched to real PETG) is planned, together with cylinder, shaped panels, build123d accessories and the calibration print. The colour analysis must not depend on the filaments the owner has; owned filaments come in only through an explicit option.
+- **Modes:** mono (white filament) is done: flat, curved and cylinder panels print **standing** (thickness along y or radial), shaped panels print **lying** (thickness along z). Colour (M600 changes, printed **lying**, thickness along z, backlit, ideal colours found from the photo and then matched to real PETG) is planned, together with the calibration print. The colour analysis must not depend on the filaments the owner has; owned filaments come in only through an explicit option.
 - **License:** GPL-3.0-only.
 
 ## Language
@@ -42,8 +42,10 @@ uv run lithophane-forge printers
 | `profiles.py` | Finds and parses PrusaResearch.ini, resolves `inherits` |
 | `image.py` | Load (EXIF), crop to the aspect, resize, tone (levels in L*, CLAHE, gamma) → linear light; `analyse()` gives advice |
 | `optics.py` | Beer-Lambert: thickness ↔ light. `td` = mm that let 10 % through |
-| `mesh.py` | Thickness grid → closed mesh (`shell`), mappings `standing`, `lying`, `arc` (also closed cylinder), binary STL |
-| `forge.py` | The `make` pipeline: sizes, grid, frame, overhang limit, mesh, placement, files, slicing, `plan.json`, `report.md` |
+| `mesh.py` | Thickness grid → closed mesh (`shell`), mappings `standing`, `lying`, `arc` (also closed cylinder); `masked` / `lying_masked` for shaped panels (`connect_diagonals` first); binary STL |
+| `forge.py` | The `make` pipeline: `Job` (and `check()`), `layout()` (sizes, grid, picture box per shape), `thickness_map`, overhang limit, `volumes()` (the panel object: lithophane, frame, tab), `place()`, accessories, files, slicing, `plan.json`, `report.md` |
+| `shapes.py` | Outlines for shaped panels: heart, oval, circle, SVG (svgelements, y flipped), PNG (dark = inside); `fit`, `size`, `cells_inside` |
+| `accessories.py` | build123d parts: `frame_ring`, `tab` (rectangle with a round top and a hole clear of the outline), `stand`, `lamp_base`; `to_mesh` merges the tessellation into a closed mesh; `remap` swaps axes |
 | `threemf.py` | Our own 3MF writer: multi-volume objects, per-object settings, M600 list, thumbnail, full config |
 | `slicer.py` | PrusaSlicer CLI: temporary `--datadir`, slice, summary, config from G-code |
 | `render.py` | Simulated backlit view, relief hillshade, preview sheet, thumbnail |
@@ -55,14 +57,18 @@ uv run lithophane-forge printers
 - **Grid.** Points are `pitch` apart (0.2 mm); the outer size is exact (`linspace`). Above `max_triangles` the pitch grows and a note says so. The frame (`frame` mm wide, `t_max + 0.8` thick) is part of the grid; the photo fills the inside.
 - **Mesh.** `mesh.shell` joins the relief face (every grid point) and the flat face (only its edge points: long strips, and fans at the two end strips). About two triangles per grid point. Always closed, positive volume.
 - **Overhangs.** A standing panel has ledges on the relief side where a thick part lies above a thin one. `forge.limit_overhangs` thickens the plastic below so that nothing leans out more than `max_overhang` (60° from vertical). PrusaSlicer's MK4 presets want support beyond 50°; the test slices with the threshold at our limit + 5° and expects no support.
-- **Viewing side.** By default the flat face looks at the viewer and the light goes behind the relief. The tests check that the picture reads the right way round from the viewer's side, for both views and both shapes.
+- **Viewing side.** By default the flat face looks at the viewer and the light goes behind the relief. The tests check that the picture reads the right way round from the viewer's side, for both views and every shape.
+- **Shaped panels.** The grid cells whose centre lies inside the outline inset by half the frame width form the lithophane (`mesh.lying_masked`): its edge is stepped. The frame (build123d, the full frame width inside the outline) is a second volume of the same object and covers the steps; PrusaSlicer joins the two. Standing shaped panels would need support under the lower half of the outline, so they print lying.
+- **Cylinder.** The grid wraps around (`mesh.arc(wrap=True)`); the frame is only at the top and bottom (rims). The middle of the picture faces −y, the seam is at the back. The default height is 1.25 × the diameter; `cylinder_notes` says how much of the photo is cropped and which `--repeat` fits it.
+- **Accessories.** Stand (slot `frame_t + 2 × 0.10` mm, as deep as the frame) and lamp base (recess `diameter + 2 × 0.30` mm, LED pocket, cable notch) are separate 3MF projects with `layer_height = 0.2` as an object setting.
 
 ## Frames
 
 - **Panel frame:** u along the width (left to right as the viewer sees it), v up, w through the thickness (0 on the flat face).
 - **Standing (flat):** u → x, v → z, w → +y. The viewer of the flat face stands at −y.
 - **Curved:** bent around the z axis, the flat face on the outer radius, the middle facing −y. The width is the arc length on the flat face.
-- **Lying (colour mode, later):** u → x, v → y, w → z. Seen from below (the bed face), left and right swap.
+- **Lying (shaped panels; colour mode later):** u → x, v → y, w → z. Seen from below (the bed face), left and right swap: with `view="flat"` all volumes are mirrored in x.
+- **Cylinder:** like curved, closed: u from −π r to π r around the z axis.
 - `thickness_map` returns the grid as the viewer sees it (row 0 at the top); `panel()` turns it into mesh order (row 0 at the bottom, columns swapped for `view="relief"`).
 
 ## 3MF and PrusaSlicer notes
