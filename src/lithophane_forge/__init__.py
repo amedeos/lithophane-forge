@@ -11,6 +11,8 @@ examples:
   lithophane-forge analyze photo.jpg
   lithophane-forge make photo.jpg --width 120
   lithophane-forge make photo.jpg --shape curved --height 100 --arc 110
+  lithophane-forge make photo.jpg --shape cylinder --diameter 80 --repeat 2 --lamp-base
+  lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
   lithophane-forge make photo.jpg --printer coreone --material pla --slice
   lithophane-forge printers
 """
@@ -86,6 +88,17 @@ def parser() -> argparse.ArgumentParser:
         help="curved: degrees of arc (10 to 300)",
     )
     size.add_argument(
+        "--diameter", type=_number(float, 20), help="cylinder: outer diameter in mm (default 80)"
+    )
+    size.add_argument(
+        "--repeat", type=_number(int, 1), default=1, help="cylinder: copies of the photo around it"
+    )
+    size.add_argument(
+        "--mask",
+        default="heart",
+        help="shaped: heart, oval, circle, or an SVG or PNG file (dark = inside)",
+    )
+    size.add_argument(
         "--frame", type=_number(float, 0), default=3.0, help="frame width in mm (0: none)"
     )
     size.add_argument(
@@ -132,6 +145,24 @@ def parser() -> argparse.ArgumentParser:
         "--pitch", type=_number(float, 0.05), default=0.2, help="mm between grid points"
     )
     look.add_argument("--max-triangles", type=_number(int, 10_000), default=1_000_000)
+    extra = m.add_argument_group("extras")
+    extra.add_argument(
+        "--hole", action="store_true", help="flat and shaped: a hanging tab with a hole on top"
+    )
+    extra.add_argument(
+        "--stand", action="store_true", help="flat: also make a stand with a slot for the panel"
+    )
+    extra.add_argument(
+        "--lamp-base",
+        action="store_true",
+        help="cylinder: also make a base with a pocket for an LED",
+    )
+    extra.add_argument(
+        "--led-diameter", type=_number(float, 10), default=40.0, help="LED pocket diameter, mm"
+    )
+    extra.add_argument(
+        "--led-height", type=_number(float, 5), default=18.0, help="LED pocket height, mm"
+    )
     prn = m.add_argument_group("printer")
     prn.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
     prn.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
@@ -180,6 +211,14 @@ def job_from(args: argparse.Namespace):
         width=args.width,
         height=args.height,
         arc=args.arc,
+        diameter=args.diameter,
+        repeat=args.repeat,
+        mask=args.mask,
+        hole=args.hole,
+        stand=args.stand,
+        lamp_base=args.lamp_base,
+        led_d=args.led_diameter,
+        led_h=args.led_height,
         frame=args.frame,
         frame_t=args.frame_t,
         pitch=args.pitch,
@@ -201,19 +240,20 @@ def cmd_make(args) -> int:
     except ValueError as e:
         raise UsageError(str(e)) from None
     sx, sy, sz = res.size
+    lay = res.layout
     print(
         f"{job.stem}: {job.shape}, {sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, "
-        f"grid {res.grid[1]} x {res.grid[0]} at {res.pitch:.2f} mm, "
+        f"grid {lay.cols} x {lay.rows} at {lay.pitch:.2f} mm, "
         f"{res.triangles:,} triangles, {res.volume_cm3:.1f} cm3"
     )
     s = job.setup
     print(f"printer: {s.printer_preset} | {s.print_preset} | {s.filament_preset}")
-    if res.sliced:
-        print(f"PrusaSlicer: {res.sliced['time']}, {res.sliced['filament_g']} g")
+    for name, info in res.sliced.items():
+        print(f"PrusaSlicer, {name}: {info['time']}, {info['filament_g']} g")
     for note in res.notes:
         print(f"note: {note}")
     for kind, path in res.files.items():
-        print(f"{kind:8s} {path}")
+        print(f"{kind:16s} {path}")
     return 0
 
 

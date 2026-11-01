@@ -19,13 +19,21 @@ def _u8(rgb: np.ndarray) -> Image.Image:
     return Image.fromarray((np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8))
 
 
-def backlit(thickness: np.ndarray, optics: Optics, light=LED) -> Image.Image:
-    """The panel lit from behind, as the viewer sees it (thickness in viewer orientation)."""
+def _masked(rgb: np.ndarray, mask) -> np.ndarray:
+    if mask is not None:
+        rgb = np.where(mask[..., None], rgb, np.array(BACKGROUND) / 255)
+    return rgb
+
+
+def backlit(thickness: np.ndarray, optics: Optics, light=LED, mask=None) -> Image.Image:
+    """The panel lit from behind, as the viewer sees it (thickness in viewer orientation).
+    `mask`: where the panel is (shaped panels); the rest shows the background."""
     lum = optics.light(thickness)  # 1 at t_min
-    return _u8(linear_to_srgb(lum[..., None] * np.asarray(light)[None, None, :]))
+    rgb = linear_to_srgb(lum[..., None] * np.asarray(light)[None, None, :])
+    return _u8(_masked(rgb, mask))
 
 
-def relief(thickness: np.ndarray, pitch: float) -> Image.Image:
+def relief(thickness: np.ndarray, pitch: float, mask=None) -> Image.Image:
     """The relief side in raking light from the upper left (a hillshade)."""
     gy, gx = np.gradient(thickness, pitch)
     normal = np.dstack([-gx, gy, np.ones_like(thickness)])
@@ -34,7 +42,7 @@ def relief(thickness: np.ndarray, pitch: float) -> Image.Image:
     sun /= np.linalg.norm(sun)
     shade = np.clip(normal @ sun, 0, 1)
     base = 0.25 + 0.75 * shade
-    return _u8(np.dstack([base * 0.95, base * 0.95, base]))
+    return _u8(_masked(np.dstack([base * 0.95, base * 0.95, base]), mask))
 
 
 def _fit(im: Image.Image, box: int) -> Image.Image:
