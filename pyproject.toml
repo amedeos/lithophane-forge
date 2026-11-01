@@ -15,7 +15,6 @@ dependencies = [
     "scipy>=1.14",
     "shapely>=2.1.0",
     "svgelements>=1.9.6",
-    "trimesh>=4.5.0",
 ]
 
 [project.scripts]
@@ -26,7 +25,7 @@ requires = ["uv_build>=0.12.24,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest>=8.3", "ruff>=0.16"]
+dev = ["pytest>=8.3", "ruff>=0.16", "trimesh>=4.5.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

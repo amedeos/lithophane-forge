@@ -89,6 +89,7 @@ def test_analyze(photo, capsys):
         ),
         (["make", "{photo}", "--height", "500", "--pitch", "1"], "does not fit"),
         (["make", "{photo}", "--clahe", "0.01"], "--mode mono"),
+        (["make", "{photo}", "--td", "2"], "--td is for white prints"),
     ],
 )
 def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
@@ -113,6 +114,24 @@ def test_allow_abrasive_reaches_the_job(photo, tmp_path):
     args = parser().parse_args(["make", str(photo), "--mode", "color", "--allow-abrasive"])
     assert job_from(args).allow_abrasive
     assert not job_from(parser().parse_args(["make", str(photo)])).allow_abrasive
+
+
+@pytest.mark.parametrize("command", ["make", "analyze"])
+def test_a_file_that_is_not_a_photo(command, tmp_path, capsys, no_slicer):
+    fake = tmp_path / "notes.jpg"
+    fake.write_text("not a photo", encoding="utf-8")
+    assert main([command, str(fake)] + (["-o", str(tmp_path)] if command == "make" else [])) == 2
+    assert "cannot read" in capsys.readouterr().err
+
+
+def test_a_wrong_prusa_slicer_is_an_error(monkeypatch, capsys):
+    from lithophane_forge import slicer
+
+    monkeypatch.setenv("PRUSA_SLICER", "/no/such/prusa-slicer --datadir x")
+    with pytest.raises(ValueError, match="does not name a command"):
+        slicer.command()
+    assert main(["printers"]) == 2
+    assert "PRUSA_SLICER" in capsys.readouterr().err
 
 
 def test_calibrate_errors_exit_with_2(monkeypatch, capsys, tmp_path):

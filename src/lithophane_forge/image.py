@@ -9,13 +9,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 Image.MAX_IMAGE_PIXELS = 400_000_000  # big camera files are fine
 
 
 def load(path: Path) -> np.ndarray:
     """RGB floats in [0, 1] (sRGB), turned upright from the EXIF orientation, alpha on white."""
+    try:
+        return _load(path)
+    except (UnidentifiedImageError, OSError) as e:
+        raise ValueError(f"cannot read {path} as a photo: {e}") from None
+
+
+def _load(path: Path) -> np.ndarray:
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)
         if im.mode.startswith("I") or im.mode == "F":

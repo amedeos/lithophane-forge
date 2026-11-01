@@ -425,13 +425,13 @@ dependencies = [
     { name = "scipy" },
     { name = "shapely" },
     { name = "svgelements" },
-    { name = "trimesh" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+    { name = "trimesh" },
 ]
 
 [package.metadata]
@@ -443,13 +443,13 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.14" },
     { name = "shapely", specifier = ">=2.1.0" },
     { name = "svgelements", specifier = ">=1.9.6" },
-    { name = "trimesh", specifier = ">=4.5.0" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "ruff", specifier = ">=0.16" },
+    { name = "trimesh", specifier = ">=4.5.0" },
 ]
 
 [[package]]

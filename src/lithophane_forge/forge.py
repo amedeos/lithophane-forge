@@ -1,5 +1,6 @@
 """From a photo to the files you print: the whole pipeline of `lithophane-forge make`."""
 
+import glob
 import json
 import math
 import tempfile
@@ -120,6 +121,13 @@ class Job:
             raise ValueError(f"a shaped panel needs a frame of at least {MIN_SHAPED_FRAME} mm")
         if self.repeat < 1:
             raise ValueError("--repeat must be at least 1")
+        if self.shape == "shaped":
+            top = self.color_range[1] if self.mode == "color" else self.optics.t_max
+            if self.frame_thickness < top - 1e-9:
+                raise ValueError(
+                    f"a shaped panel's frame must be at least {top:g} mm thick (--frame-t) "
+                    "to hide the stepped edge of the picture"
+                )
         if self.shape == "curved" and not 10 <= self.arc <= MAX_ARC:
             raise ValueError(
                 f"the arc must be 10 to {MAX_ARC:g} degrees (got {self.arc:g}); "
@@ -190,7 +198,12 @@ def layout(job: Job, photo_aspect: float) -> Layout:
         unit = shapes.unit(job.mask)
         width, height = shapes.size(job.mask, unit, job.width, job.height, photo_aspect)
         outline = shapes.fit(unit, width, height)
-        x0, y0, x1, y1 = outline.buffer(-f).bounds
+        inner = outline.buffer(-f)
+        if inner.is_empty:  # its bounds would be NaN
+            raise ValueError(
+                f"the panel ({width:.0f} x {height:.0f} mm) is too small for a {f:g} mm frame"
+            )
+        x0, y0, x1, y1 = inner.bounds
         box = (x0 + width / 2, x1 + width / 2, y0, y1)
         per_point = 4  # both faces are full grids
     else:
@@ -249,11 +262,8 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
 
     from . import palette
 
-    u = np.linspace(0, lay.width, lay.cols)
-    v = np.linspace(lay.height, 0, lay.rows)
+    in_v, in_u, _ = picture_cells(job, lay)  # colour panels are never cylinders: one copy
     u0, u1, v0, v1 = lay.photo_box
-    in_u = (u >= u0 - 1e-9) & (u <= u1 + 1e-9)
-    in_v = (v >= v0 - 1e-9) & (v <= v1 + 1e-9)
     ci, ri = int(in_u.sum()), int(in_v.sum())
     photo = image.frame(rgb, (u1 - u0) / (v1 - v0), job.crop)
     target = palette.target(image.resize(photo, ri, ci), job.tone.levels, job.tone.gamma)
@@ -450,7 +460,8 @@ def make(job: Job) -> Result:
 
     folder = job.folder
     folder.mkdir(parents=True, exist_ok=True)
-    mask, t_seen = None, t_view
+    clear_outputs(folder, job.stem, keep=job.photo)
+    mask, inner, t_seen = None, None, t_view
     if lay.outline is not None:  # show the frame volume as the viewer will see it
         from . import shapes
 
@@ -467,10 +478,11 @@ def make(job: Job) -> Result:
             relief_panel(job, t_seen, lay.pitch, mask),
         ]
     else:
-        lit = render.colour(cmap.real, mask)
+        lit = render.colour(with_frame(cmap.real, inner, cmap.plan.real), mask)
+        ideal = with_frame(cmap.ideal, inner, cmap.plan.ideal)
         panels = [
             ("photo", render._u8(photo)),
-            ("ideal colours (simulated)", render.colour(cmap.ideal, mask)),
+            ("ideal colours (simulated)", render.colour(ideal, mask)),
             ("suggested filaments (simulated)", lit),
             ("filament changes", render.palette_strip(cmap.plan, job.setup.layer)),
         ]
@@ -551,6 +563,29 @@ def cylinder_notes(job: Job, lay: Layout, photo_aspect: float) -> list[str]:
     hint = f"; try --repeat {best}" if best != job.repeat else ""
     note = f"the cylinder keeps only {kept:.0%} of the photo{hint}, or set --height"
     return [note]
+
+
+def with_frame(sim: np.ndarray, inner: np.ndarray | None, fit) -> np.ndarray:
+    """A simulated colour print with the frame of a shaped panel: outside `inner` the frame
+    volume covers the picture with the whole stack (the darkest colour of the path)."""
+    if inner is None:
+        return sim
+    return np.where(inner[..., None], sim, fit.colours[-1])
+
+
+OUTPUTS = [f"{{s}}{part}.{ext}" for part in ("", "-*") for ext in ("stl", "3mf", "gcode", "bgcode")]
+OUTPUTS += ["preview.png", "plan.json", "report.md"]
+
+
+def clear_outputs(folder: Path, stem: str, keep: Path | None = None) -> None:
+    """Remove the files an earlier run wrote under this name (only the kinds we write, and
+    never `keep`, the photo). Above all its G-code: a run without --slice would leave G-code
+    with other filaments and change heights next to the new project and report."""
+    keep = keep.resolve() if keep else None
+    for pattern in OUTPUTS:
+        for path in folder.glob(pattern.format(s=glob.escape(stem))):
+            if path.is_file() and path.resolve() != keep:
+                path.unlink()
 
 
 def relief_panel(job: Job, t_view: np.ndarray, pitch: float, mask=None):
