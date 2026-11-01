@@ -38,7 +38,7 @@ uv run lithophane-forge printers                          # supported printers a
 
 ## Output
 
-Everything goes to `out/<name>/`, where `<name>` is the photo's name (or `--name`).
+Put the photos you want to try in `photos/`: git ignores everything in it, so your own photos never end up in the repository. Everything the tool makes goes to `out/<name>/` (also ignored), where `<name>` is the photo's name (or `--name`).
 
 | File | What it is |
 |---|---|

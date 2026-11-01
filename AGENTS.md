@@ -33,6 +33,7 @@ uv run lithophane-forge calibrate [--slice]
 uv run lithophane-forge printers
 ```
 
+- Test photos go in `photos/` (git-ignored, only `.gitkeep` is tracked): the owner's personal photos never go into the repository.
 - Output goes to `out/<name>/` (git-ignored): `<name>.stl`, `<name>.3mf` (project), `<name>.bgcode` with `--slice`, `preview.png`, `plan.json`, `report.md`.
 - `$LITHOPHANE_FORGE_PROFILES` names the PrusaResearch.ini (or its folder) when it is not in `profiles.SEARCH` (system install, PrusaSlicer's data folder, Flatpak). `$PRUSA_SLICER` names the PrusaSlicer command.
 
@@ -99,7 +100,7 @@ uv run lithophane-forge printers
 
 1. `uv run ruff check . && uv run ruff format --check .`
 2. `uv run pytest` (all green; with PrusaSlicer installed the `slicer` tests slice every printer in the table).
-3. `uv run lithophane-forge make <photo> --slice` and look at `out/<name>/preview.png` and `report.md`.
+3. `uv run lithophane-forge make photos/<photo> --slice` and look at `out/<name>/preview.png` and `report.md`.
 
 ## Git
 
