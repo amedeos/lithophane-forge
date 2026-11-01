@@ -260,27 +260,52 @@ class Fitter:
         self,
         targets: list[tuple[list[Filament], np.ndarray]],
         choices: list[Filament],
-        rounds: int = 2,
+        rounds: int = 4,
     ) -> tuple[list[Filament], np.ndarray]:
-        """Real filaments for target colours (with their change heights): start from the
-        closest colours, then change one position at a time to the filament that makes the
-        whole print closest to the photo, and fit the heights again. That can get stuck
-        (a dark filament low in the stack hides every change above it), so it runs once per
-        target and keeps the best. The base comes from the light, neutral, translucent
-        filaments, if the list has any."""
+        """Real filaments for target colours (with their change heights).
+
+        Start from the closest colours. Then, one position at a time, try every filament at
+        every layer top between its neighbours' changes and keep the pair (filament, height)
+        that brings the whole print closest to the photo; fit all heights again after each
+        round. Choosing the filament with the heights fixed got stuck: a dark filament low in
+        the stack hides every change above it, and a 4-colour plan ended with 2 filaments.
+        It runs once per target and keeps the best. The base comes from the light, neutral,
+        translucent filaments, if the list has any."""
         bases = [c for c in choices if is_base(c)] or choices
         found = []
         for wanted, starts in targets:
             options = [bases] + [choices] * (len(wanted) - 1)
             picked = [nearest(f.linear, opts)[0] for f, opts in zip(wanted, options)]
+            starts = np.concatenate([[0.0], _snap(np.asarray(starts, float)[1:], self.h)])
+            best = self.cost_of(picked, starts)
             for _ in range(rounds):
+                moved = False
                 for i, opts in enumerate(options):
-                    costs = [self.cost_of(picked[:i] + [c] + picked[i + 1 :], starts) for c in opts]
-                    picked[i] = opts[int(np.argmin(costs))]
-                starts = self.heights_for(picked, starts)
-            found.append((self.cost_of(picked, starts), picked, starts))
+                    for c, z in self._moves(i, opts, starts):
+                        trial = [*picked[:i], c, *picked[i + 1 :]]
+                        trial_starts = starts.copy()
+                        trial_starts[i] = z
+                        cost = self.cost_of(trial, trial_starts)
+                        if cost < best - 1e-9:
+                            best, picked, starts, moved = cost, trial, trial_starts, True
+                refit = self.heights_for(picked, starts)
+                if self.cost_of(picked, refit) < best:
+                    best, starts = self.cost_of(picked, refit), refit
+                if not moved:
+                    break
+            found.append((best, picked, starts))
         _, picked, starts = min(found, key=lambda f: f[0])
         return picked, starts
+
+    def _moves(self, i: int, options: list[Filament], starts: np.ndarray):
+        """Every filament at every layer top where position i can start (the base at 0)."""
+        if i == 0:
+            heights = [0.0]
+        else:
+            above = starts[i + 1] if i + 1 < len(starts) else np.inf
+            tops = self.h[:-1]  # a change at the top layer would print nothing
+            heights = tops[(tops > starts[i - 1] + 1e-9) & (tops < above - 1e-9)]
+        return [(c, float(z)) for c in options for z in heights]
 
 
 WEIGHTS = np.array([1.5, 1.0, 1.0])  # lightness counts a little more than hue

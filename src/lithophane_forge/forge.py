@@ -541,8 +541,8 @@ def colour_notes(job: Job, plan) -> list[str]:
         )
     if len(plan.real.filaments) < job.colors:
         notes.append(
-            f"{len(plan.real.filaments)} filaments are enough for this photo (you asked for "
-            f"{job.colors}): more changes would not bring it closer"
+            f"the plan uses {len(plan.real.filaments)} of the {job.colors} filaments: the "
+            "search found no place for more that brings the print closer to the photo"
         )
     if job.setup.material != "petg" and job.filaments is None:
         notes.append(
