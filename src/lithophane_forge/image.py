@@ -1,0 +1,199 @@
+"""Load a photo, frame it to the print, and turn it into a map of wanted light.
+
+The photo is in sRGB (display gamma). A lithophane shows linear light, so the tone work
+(levels, local contrast) runs on the perceptual lightness L* and the result goes back to
+linear luminance at the end.
+"""
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageOps
+
+Image.MAX_IMAGE_PIXELS = 400_000_000  # big camera files are fine
+
+
+def load(path: Path) -> np.ndarray:
+    """RGB floats in [0, 1] (sRGB), turned upright from the EXIF orientation, alpha on white."""
+    with Image.open(path) as im:
+        im = ImageOps.exif_transpose(im)
+        if im.mode.startswith("I") or im.mode == "F":
+            # 16-bit grey (I;16, or I from older Pillow) and float: convert("RGB") would clip
+            # them at 255 instead of scaling them
+            grey = np.asarray(im, dtype=np.float64)
+            top = grey.max(initial=0)
+            if im.mode.startswith("I;16") or top > 255:
+                grey /= 65535
+            elif im.mode != "F" or top > 1:
+                grey /= 255
+            return np.repeat(np.clip(grey, 0, 1)[..., None], 3, axis=2)
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGBA")
+            white = Image.new("RGBA", im.size, (255, 255, 255, 255))
+            im = Image.alpha_composite(white, im)
+        rgb = np.asarray(im.convert("RGB"), dtype=np.float64) / 255
+    return rgb
+
+
+def srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    c = np.asarray(c, dtype=np.float64)
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def linear_to_srgb(c: np.ndarray) -> np.ndarray:
+    c = np.clip(c, 0, 1)
+    return np.where(c <= 0.0031308, 12.92 * c, 1.055 * c ** (1 / 2.4) - 0.055)
+
+
+def luminance(rgb: np.ndarray) -> np.ndarray:
+    """Linear luminance Y (Rec. 709 / sRGB primaries)."""
+    lin = srgb_to_linear(rgb)
+    return lin @ np.array([0.2126, 0.7152, 0.0722])
+
+
+def y_to_lstar(y: np.ndarray) -> np.ndarray:
+    y = np.clip(y, 0, 1)
+    return np.where(y > (6 / 29) ** 3, 116 * np.cbrt(y) - 16, y * (29 / 3) ** 3)
+
+
+def lstar_to_y(lstar: np.ndarray) -> np.ndarray:
+    f = (np.asarray(lstar) + 16) / 116
+    return np.where(f > 6 / 29, f**3, (np.asarray(lstar)) * (3 / 29) ** 3)
+
+
+def parse_crop(text: str) -> tuple[int, int, int, int]:
+    """'X,Y,W,H' in photo pixels."""
+    parts = [int(p) for p in text.split(",")]
+    if len(parts) != 4 or parts[2] <= 0 or parts[3] <= 0:
+        raise ValueError(f"crop must be X,Y,W,H with W, H > 0 (got {text!r})")
+    return parts[0], parts[1], parts[2], parts[3]
+
+
+def crop(rgb: np.ndarray, box: tuple[int, int, int, int] | None) -> np.ndarray:
+    """The user's crop (X, Y, W, H in photo pixels), or the whole photo."""
+    if not box:
+        return rgb
+    x, y, w, h = box
+    rgb = rgb[max(y, 0) : y + h, max(x, 0) : x + w]
+    if rgb.size == 0:
+        raise ValueError("the crop lies outside the photo")
+    return rgb
+
+
+def frame(
+    rgb: np.ndarray, aspect: float, box: tuple[int, int, int, int] | None = None
+) -> np.ndarray:
+    """Crop the photo to `aspect` (width / height): first the user's crop, then the
+    largest centred window with that aspect."""
+    rgb = crop(rgb, box)
+    h, w = rgb.shape[:2]
+    if w / h > aspect:
+        nw = max(1, round(h * aspect))
+        x0 = (w - nw) // 2
+        return rgb[:, x0 : x0 + nw]
+    nh = max(1, round(w / aspect))
+    y0 = (h - nh) // 2
+    return rgb[y0 : y0 + nh]
+
+
+def resize(rgb: np.ndarray, rows: int, cols: int) -> np.ndarray:
+    im = Image.fromarray((np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8))
+    im = im.resize((cols, rows), Image.LANCZOS)
+    return np.asarray(im, dtype=np.float64) / 255
+
+
+@dataclass(frozen=True)
+class Tone:
+    """Tone settings: what we do to the lightness before we print it."""
+
+    levels: tuple[float, float] = (0.5, 99.5)  # percentiles that become black and white
+    gamma: float = 1.0  # > 1 darkens the mid-tones, < 1 brightens them
+    clahe: float = 0.0  # local contrast (CLAHE clip limit); 0 = off, 0.01 = mild
+    invert: bool = False  # negative picture (rarely wanted)
+
+
+def light_map(rgb: np.ndarray, tone: Tone | None = None) -> np.ndarray:
+    """RGB (sRGB) -> wanted linear light in [0, 1], after levels, local contrast and gamma."""
+    tone = tone or Tone()
+    lstar = y_to_lstar(luminance(rgb)) / 100
+    lo, hi = np.percentile(lstar, tone.levels)
+    if hi - lo > 1e-6:
+        lstar = np.clip((lstar - lo) / (hi - lo), 0, 1)
+    if tone.clahe > 0:
+        from skimage import exposure
+
+        lstar = exposure.equalize_adapthist(lstar, clip_limit=tone.clahe)
+    if tone.invert:
+        lstar = 1 - lstar  # a negative in lightness: mid-grey stays mid-grey
+    light = lstar_to_y(lstar * 100)
+    if tone.gamma != 1.0:
+        light = light**tone.gamma
+    return np.clip(light, 0, 1)
+
+
+@dataclass
+class Analysis:
+    """What we can tell about a photo before printing it."""
+
+    size: tuple[int, int]  # width, height in pixels
+    mean_lstar: float
+    p1_lstar: float
+    p99_lstar: float
+    shadows: float  # share of pixels with L* < 5
+    highlights: float  # share of pixels with L* > 95
+    colourfulness: float  # Hasler & Suesstrunk; above ~40 the photo is very colourful
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def dynamic_range(self) -> float:
+        return self.p99_lstar - self.p1_lstar
+
+
+def analyse(rgb: np.ndarray, grid: tuple[int, int] | None = None) -> Analysis:
+    """Statistics and advice. `grid` (rows, cols) is the print grid, to check resolution."""
+    lstar = y_to_lstar(luminance(rgb))
+    p1, p99 = np.percentile(lstar, [1, 99])
+    r, g, b = (rgb[..., k] * 255 for k in range(3))
+    rg, yb = r - g, (r + g) / 2 - b
+    colourful = float(np.hypot(rg.std(), yb.std()) + 0.3 * np.hypot(rg.mean(), yb.mean()))
+    a = Analysis(
+        (rgb.shape[1], rgb.shape[0]),
+        float(lstar.mean()),
+        float(p1),
+        float(p99),
+        float((lstar < 5).mean()),
+        float((lstar > 95).mean()),
+        colourful,
+    )
+    if a.dynamic_range < 50:
+        a.notes.append(
+            f"low contrast (L* {p1:.0f}..{p99:.0f}): levels will stretch it; "
+            "try --clahe 0.01 for more local contrast"
+        )
+    if a.shadows > 0.25:
+        a.notes.append(
+            f"{a.shadows:.0%} of the photo is near black: those parts print at full "
+            "thickness (more time and plastic) and show no detail"
+        )
+    if a.highlights > 0.25:
+        a.notes.append(
+            f"{a.highlights:.0%} of the photo is near white: those parts print at "
+            "minimum thickness and show no detail"
+        )
+    if a.mean_lstar < 35:
+        a.notes.append("dark photo: try --gamma 0.8 to open the shadows")
+    elif a.mean_lstar > 75:
+        a.notes.append("bright photo: try --gamma 1.3 to bring back the light tones")
+    if a.colourfulness > 40:
+        a.notes.append(
+            f"very colourful photo ({a.colourfulness:.0f}): a lithophane shows only "
+            "lightness, so colours of the same lightness will merge"
+        )
+    if grid and (rgb.shape[0] < grid[0] or rgb.shape[1] < grid[1]):
+        a.notes.append(
+            f"the photo ({rgb.shape[1]} x {rgb.shape[0]} px after cropping) has "
+            f"fewer pixels than the print grid ({grid[1]} x {grid[0]}): it will "
+            "look soft; print it smaller"
+        )
+    return a
