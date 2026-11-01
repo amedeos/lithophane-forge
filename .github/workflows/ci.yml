@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # PrusaSlicer's vendor bundle that the preset names are checked against (the same file as
+  # /usr/share/PrusaSlicer/profiles/PrusaResearch.ini in PrusaSlicer 2.9.6)
+  PROFILES_URL: https://raw.githubusercontent.com/prusa3d/PrusaSlicer-settings-prusa-fff/main/PrusaResearch/2.4.14.ini
+  PROFILES_SHA256: a6155d92471d3b0ae11bed051bb04a4c1157fd6b05fef22416eafd12bce9c839
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.24"  # the uv that wrote uv.lock (and the uv_build pin)
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked --only-group dev  # ruff only: no need for build123d here
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.24"  # the uv that wrote uv.lock (and the uv_build pin)
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: PrusaSlicer profiles
+        run: |
+          mkdir -p "$RUNNER_TEMP/profiles"
+          curl -fsSL -o "$RUNNER_TEMP/profiles/PrusaResearch.ini" "$PROFILES_URL"
+          echo "$PROFILES_SHA256  $RUNNER_TEMP/profiles/PrusaResearch.ini" | sha256sum -c -
+          echo "LITHOPHANE_FORGE_PROFILES=$RUNNER_TEMP/profiles" >> "$GITHUB_ENV"
+      - run: uv sync --locked
+      - run: uv run pytest -m "not slicer"
+
+  slice:
+    # Best effort: PrusaSlicer for Linux ships only as a Flatpak, which is big and slow to
+    # install on a runner. The real slicing checks also run locally (uv run pytest).
+    name: slice (PrusaSlicer Flatpak, best effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.24"  # the uv that wrote uv.lock (and the uv_build pin)
+          python-version: "3.14"
+          enable-cache: true
+      - name: Install PrusaSlicer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub com.prusa3d.PrusaSlicer
+      - name: PrusaSlicer profiles
+        run: |
+          mkdir -p "$HOME/profiles" "$HOME/tmp"
+          curl -fsSL -o "$HOME/profiles/PrusaResearch.ini" "$PROFILES_URL"
+          echo "$PROFILES_SHA256  $HOME/profiles/PrusaResearch.ini" | sha256sum -c -
+          echo "LITHOPHANE_FORGE_PROFILES=$HOME/profiles" >> "$GITHUB_ENV"
+      - run: uv sync --locked
+      - name: Slice
+        env:
+          PRUSA_SLICER: flatpak run --filesystem=host --filesystem=/tmp --command=prusa-slicer com.prusa3d.PrusaSlicer
+        run: TMPDIR="$HOME/tmp" uv run pytest -m slicer -v --basetemp "$HOME/pytest"

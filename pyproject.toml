@@ -1,0 +1,37 @@
+[project]
+name = "lithophane-forge"
+version = "0.1.0"
+description = "Turn a photo into a printable lithophane and a ready-to-print PrusaSlicer project"
+readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "Amedeo Salvati" }]
+requires-python = ">=3.13,<3.15"
+dependencies = [
+    "build123d>=0.13.0",
+    "numpy>=2",
+    "pillow>=12.0.0",
+    "scikit-image>=0.25",
+    "scipy>=1.14",
+    "shapely>=2.1.0",
+    "svgelements>=1.9.6",
+    "trimesh>=4.5.0",
+]
+
+[project.scripts]
+lithophane-forge = "lithophane_forge:main"
+
+[build-system]
+requires = ["uv_build>=0.12.24,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "ruff>=0.16"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["slicer: needs the PrusaSlicer command line (deselect with -m 'not slicer')"]
+
+[tool.ruff]
+line-length = 100

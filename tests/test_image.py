@@ -1,0 +1,52 @@
+import numpy as np
+import pytest
+
+from lithophane_forge import image
+
+
+def test_frame_keeps_the_aspect():
+    rgb = np.zeros((300, 400, 3))
+    for aspect in (0.5, 1.0, 4 / 3, 2.0):
+        h, w = image.frame(rgb, aspect).shape[:2]
+        assert w / h == pytest.approx(aspect, rel=0.01)
+
+
+def test_crop_comes_first():
+    rgb = np.zeros((300, 400, 3))
+    rgb[50:150, 100:200] = 1
+    out = image.frame(rgb, 1.0, (100, 50, 100, 100))
+    assert out.shape[:2] == (100, 100) and out.min() == 1
+
+
+def test_parse_crop():
+    assert image.parse_crop("1,2,3,4") == (1, 2, 3, 4)
+    with pytest.raises(ValueError):
+        image.parse_crop("1,2,0,4")
+
+
+def test_light_map_stretches_to_full_range():
+    rgb = np.dstack([np.linspace(0.3, 0.6, 200)[None, :].repeat(50, 0)] * 3)
+    light = image.light_map(rgb)
+    assert light.min() == pytest.approx(0, abs=0.02)
+    assert light.max() == pytest.approx(1, abs=0.02)
+    assert np.all(np.diff(light[0]) >= -1e-9)
+
+
+def test_invert_and_gamma():
+    rgb = np.dstack([np.linspace(0, 1, 100)[None, :].repeat(10, 0)] * 3)
+    plain = image.light_map(rgb)
+    assert np.allclose(image.light_map(rgb, image.Tone(invert=True)), 1 - plain)
+    darker = image.light_map(rgb, image.Tone(gamma=1.5))
+    assert darker[0, 50] < plain[0, 50]
+
+
+def test_lstar_round_trip():
+    y = np.linspace(0, 1, 50)
+    assert np.allclose(image.lstar_to_y(image.y_to_lstar(y)), y, atol=1e-9)
+
+
+def test_analysis_notes():
+    dark = np.full((100, 100, 3), 0.01)
+    a = image.analyse(dark, (200, 200))
+    text = " ".join(a.notes)
+    assert "near black" in text and "fewer pixels" in text

@@ -1,8 +1,72 @@
 # 🖼️ lithophane-forge
 
-Turn a photo into a 3D-printable lithophane, with a ready-to-print PrusaSlicer project for your Prusa printer (MK4 by default).
+Turn a photo into a 3D-printable lithophane, with a ready-to-print PrusaSlicer project for your Prusa printer (Original Prusa MK4 and white PETG by default). Everything runs on the command line, on the CPU, in a few seconds.
 
-Work in progress: the first version is being built on feature branches.
+## How it works
+
+- The photo's lightness is cleaned up (levels, optional local contrast, gamma) and turned into the light you want to see.
+- Light through plastic falls off exponentially (Beer-Lambert), so each point gets the thickness that lets the right amount of light through: thin is bright, thick is dark.
+- numpy turns the thickness map into a closed mesh with a frame: a flat panel, or a curved one that stands on its own.
+- Under every thick part, the plastic slopes down at no more than 60° from vertical, so the panel prints standing without supports.
+- The 3MF is a PrusaSlicer project: the printer, print and filament presets are the official Prusa ones, and the object carries its own settings (100 % infill, enough perimeters, rear seam, brim).
+- With `--slice` you also get the G-code (binary `.bgcode` on the MK4), ready for the printer.
+
+## Requirements
+
+- [uv](https://docs.astral.sh/uv/) and Python 3.13 or 3.14 (uv installs it if needed).
+- PrusaSlicer 2.9 (optional, but needed for the full project and for `--slice`). The tool finds `prusa-slicer` on the PATH; otherwise set `PRUSA_SLICER`, for example `PRUSA_SLICER="flatpak run --filesystem=host --filesystem=/tmp --command=prusa-slicer com.prusa3d.PrusaSlicer"`.
+
+```sh
+uv sync
+uv run lithophane-forge analyze photo.jpg                 # advice before printing
+uv run lithophane-forge make photo.jpg --width 120        # flat panel, MK4, white PETG
+uv run lithophane-forge make photo.jpg --shape curved --height 100 --arc 110
+uv run lithophane-forge make photo.jpg --printer mk4s --slice
+uv run lithophane-forge make photo.jpg --height 80 --gamma 0.8 --clahe 0.01
+uv run lithophane-forge printers                          # supported printers and presets
+```
+
+## Output
+
+Everything goes to `out/<name>/`, where `<name>` is the photo's name (or `--name`).
+
+| File | What it is |
+|---|---|
+| `<name>.3mf` | PrusaSlicer project: model, presets, per-object settings, thumbnail |
+| `<name>.bgcode` | G-code for the printer (only with `--slice`; `.gcode` on printers without binary G-code) |
+| `<name>.stl` | The bare mesh, for other slicers |
+| `preview.png` | The photo, the lit panel (simulated) and the relief side |
+| `report.md` | What to print with, and how to light it |
+| `plan.json` | Every parameter and result, for tools |
+
+## Options
+
+- **Size and shape:** `--width` and `--height` are the outer size in mm, frame included; give one and the photo sets the other, or both to crop the photo. `--shape curved` bends the panel on an arc of `--arc` degrees (the width is the arc length). `--frame` sets the frame width (0 for none).
+- **Picture:** `--crop X,Y,W,H` (photo pixels), `--levels LOW,HIGH` (percentiles that become black and white), `--gamma`, `--clahe` (local contrast), `--invert`, `--view relief` (the relief faces the viewer instead of the flat face).
+- **Thickness:** `--t-min`, `--t-max` and `--td` (mm of your filament that let 10 % of the light through). The defaults for white PETG (0.8, 3.6 and 2.3 mm) are estimates: calibrate your spool for the best result.
+- **Printer:** `--printer` (`mk4`, `mk4s`, `mk3.5`, `mk3s`, `coreone`, `coreonel`, `xl`, `mini`), `--material petg|pla`, or your own presets with `--printer-preset`, `--print-preset` and `--filament-preset`.
+- **Detail:** `--pitch` (mm between grid points, 0.2 by default; a 0.4 mm nozzle gains nothing below that) and `--max-triangles`.
+
+## Printing
+
+- Use white filament. PETG lets more light through than PLA, so its thickness range is wider.
+- The panel prints standing with a brim. On the MK4, print PETG on the textured sheet, or use a release agent on the smooth sheet, and keep the filament dry.
+- Light it from behind with a diffuse, neutral white LED (about 4000 K). By default the flat face looks at you.
+
+## Coming next
+
+- Colour lithophanes with filament changes (M600): the tool finds the ideal colours for the photo, the heights of the changes, and the closest real PETG filaments.
+- Cylinder lamps and shaped panels (heart, oval, circle, your own outline), a stand, a hanging hole and a lamp base made with build123d.
+- A calibration print to measure your filament.
+
+## Development
+
+```sh
+uv run pytest                     # add -m "not slicer" to skip the PrusaSlicer runs
+uv run ruff check . && uv run ruff format --check .
+```
+
+GitHub Actions runs ruff and the tests on every push and pull request.
 
 ## License
 
