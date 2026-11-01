@@ -8,7 +8,7 @@ Guidance for coding agents working in this repository.
 
 - **Printer:** Prusa MK4 (Input Shaper firmware) with **one extruder**: no MMU. Colours come only from M600 colour changes by layer height. Other Prusa printers are in `printers.PRINTERS`.
 - **Material:** **PETG** by default (`--material pla` for PLA). The thickness defaults in `optics.DEFAULTS` are estimates until the owner calibrates a spool.
-- **Modes:** mono (white filament): flat, curved and cylinder panels print **standing** (thickness along y or radial), shaped panels print **lying** (thickness along z). Colour (`--mode color`): M600 changes, flat or shaped, printed **lying**, backlit; the ideal colours come from the photo alone and only then are matched to real PETG (Prusa's published hex and TD values) or to `--filaments`. The colour analysis must not depend on the filaments the owner has; owned filaments come in only through that explicit option.
+- **Modes:** colour is the **default** on the command line for flat and shaped panels (`job_from` picks it when `--mode` is not given; `Job` itself still defaults to mono, which the tests rely on). Mono (`--mode mono`, white filament): flat, curved and cylinder panels print **standing** (thickness along y or radial), shaped panels print **lying** (thickness along z); curved and cylinder are always mono. Colour: M600 changes, flat or shaped, printed **lying**, backlit; the ideal colours come from the photo alone and only then are matched to real PETG (Prusa's published hex and TD values) or to `--filaments`. The colour analysis must not depend on the filaments the owner has; owned filaments come in only through that explicit option.
 - **License:** GPL-3.0-only.
 
 ## Language
@@ -26,8 +26,8 @@ uv sync
 uv run pytest                     # ~50 s; -m "not slicer" skips the PrusaSlicer runs
 uv run ruff check . && uv run ruff format --check .
 uv run lithophane-forge analyze PHOTO
-uv run lithophane-forge make PHOTO [--shape flat|curved] [--width MM] [--height MM] [--slice]
-uv run lithophane-forge make PHOTO --mode color [--colors N] [--filaments FILE]
+uv run lithophane-forge make PHOTO [--colors N] [--filaments FILE] [--width MM] [--slice]   # colour, lying
+uv run lithophane-forge make PHOTO --mode mono [--shape flat|curved|cylinder] [--slice]   # white, standing
 uv run lithophane-forge analyze PHOTO --colors N
 uv run lithophane-forge calibrate [--slice]
 uv run lithophane-forge printers
