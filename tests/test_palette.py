@@ -31,6 +31,16 @@ def lake(h=90, w=120):
     return np.clip(img, 0, 1)
 
 
+def blobs(seed: int, h=90, w=120):
+    """Random coloured boxes on a random ground: no path fits them well."""
+    r = np.random.default_rng(seed)
+    img = np.zeros((h, w, 3)) + r.random(3)
+    for _ in range(6):
+        y0, x0 = r.integers(0, h - 10), r.integers(0, w - 10)
+        img[y0 : y0 + r.integers(10, 40), x0 : x0 + r.integers(10, 50)] = r.random(3)
+    return img
+
+
 @pytest.fixture(scope="module")
 def heights():
     return P.heights(0.6, 3.0, 0.2, 0.1)
@@ -139,6 +149,52 @@ def test_four_colours_use_four_filaments_when_they_help(heights):
         fitter.cost_of(four.filaments, four.starts)
         < fitter.cost_of(three.filaments, three.starts) - 1
     )
+
+
+def test_snapping_cannot_spoil_the_choice(heights):
+    """A search that fitted heights between layer tops chose a plan here that got worse
+    once snapped to layers (cost 28.0, worse than the 26.6 of fixed heights). The search
+    now stays on layer tops, so the printed plan is the one it scored."""
+    t = P.target(blobs(0))
+    choices, source = P.choices()
+    plan = P.plan(t, 4, heights, choices, source)
+    assert P.Fitter(t, heights).cost_of(plan.real.filaments, plan.real.starts) < 26.6
+
+
+def test_choose_stays_on_layer_tops(heights):
+    t = P.target(lake())
+    fitter = P.Fitter(t, heights)
+    choices, _ = P.choices()
+    wanted = choices[:5]
+    picked, starts = fitter.choose([(wanted, np.array([0, 0.9, 1.4, 2.0, 2.6]))], choices)
+    assert len(picked) == 5 and starts[0] == 0
+    assert all(np.isclose(heights, z).any() for z in starts[1:])
+    assert np.all(np.diff(starts) > 0)
+
+
+def test_no_optimiser_warnings(heights):
+    """Warnings from scipy reached the user's terminal."""
+    import warnings
+
+    from scipy.optimize import OptimizeWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", OptimizeWarning)
+        P.plan(P.target(lake()), 6, heights, *P.choices())
+
+
+def test_batched_cost_is_the_cost(heights):
+    """Fitter.costs (all candidates at once, lower heights reused) agrees with cost()."""
+    fitter = P.Fitter(P.target(lake()), heights)
+    fil = P.load_filaments()[:4]
+    starts = np.array([0, 0.9, 1.5, 2.2])
+    att = P._attenuation(fil)
+    plain = fitter.cost(att, starts)
+    low, high = heights[heights <= 0.9 + 1e-9], heights[heights > 0.9 + 1e-9]
+    below = fitter._nearest_d2(att[None], starts[None], low)[0]
+    assert fitter.costs(att, starts[None], high, below)[0] == pytest.approx(plain, rel=1e-6)
+    many = fitter.costs(np.repeat(att[None], 3, 0), np.repeat(starts[None], 3, 0))
+    assert many == pytest.approx([plain] * 3, rel=1e-6)
 
 
 def test_abrasive_filaments_are_left_out(tmp_path):

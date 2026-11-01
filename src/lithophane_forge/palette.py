@@ -90,6 +90,10 @@ class Filament:
         return hex_to_linear(self.hex)
 
 
+def _attenuation(filaments: list["Filament"]) -> np.ndarray:
+    return attenuation(np.array([f.linear for f in filaments]), np.array([f.td for f in filaments]))
+
+
 def attenuation(lin: np.ndarray, td: np.ndarray) -> np.ndarray:
     """Per-channel attenuation (1/mm) of filaments with linear colours (k, 3) and td (k,)."""
     c = np.clip(lin, 0.01, 0.98)
@@ -149,6 +153,11 @@ def _curve(att, starts, h, white) -> np.ndarray:
     return stack(att, starts, h) / white
 
 
+def _snapped(starts: np.ndarray, h: np.ndarray) -> np.ndarray:
+    """A plan's starts with every change on a layer top (the base keeps 0)."""
+    return np.concatenate([[0.0], _snap(np.asarray(starts, float)[1:], h)])
+
+
 def _snap(z: np.ndarray, h: np.ndarray) -> np.ndarray:
     """Change heights on layer tops, increasing, inside the height range."""
     out = []
@@ -176,13 +185,42 @@ class Fitter:
     def cost(self, att: np.ndarray, starts: np.ndarray) -> float:
         """Mean distance from the sampled pixels to the path (the same weighted CIELAB
         distance that `assign` uses to pick each point's height)."""
-        curve = lab(_curve(att, starts, self.h, self.white)) * WEIGHTS
-        d2 = self._w2[:, None] + (curve**2).sum(1)[None, :] - 2 * self._w @ curve.T
-        return float(np.sqrt(np.maximum(d2.min(1), 0)).mean())
+        starts = np.asarray(starts, float)[None]
+        best = self._nearest_d2(att[None], starts, self.h, np.float64)
+        return float(np.sqrt(np.maximum(best, 0)).mean())
+
+    def costs(
+        self, att: np.ndarray, starts: np.ndarray, h: np.ndarray | None = None, below=None
+    ) -> np.ndarray:
+        """`cost` for many plans at once: attenuations (n, k, 3) or one (k, 3) for all, and
+        change heights (n, k). With `h`, only those heights are compared, and `below` (per
+        sampled pixel) is the smallest squared distance over the other heights. The
+        distances are float32: half the memory traffic, which matters in `choose`; `cost`
+        (used by the ideal fit) stays float64."""
+        h = self.h if h is None else h
+        att = np.broadcast_to(att, (len(starts), *att.shape[-2:]))
+        rows = max(1, CHUNK // max(1, len(h) * len(self.sample)))
+        best = np.empty((len(starts), len(self.sample)))
+        for a in range(0, len(starts), rows):
+            best[a : a + rows] = self._nearest_d2(att[a : a + rows], starts[a : a + rows], h)
+        if below is not None:
+            best = np.minimum(best, below[None])
+        return np.sqrt(np.maximum(best, 0)).mean(1)
+
+    def _nearest_d2(
+        self, att: np.ndarray, starts: np.ndarray, h: np.ndarray, dtype=np.float32
+    ) -> np.ndarray:
+        """For each plan, each sampled pixel's squared distance to its closest height."""
+        ends = np.concatenate([starts[:, 1:], np.full((len(starts), 1), np.inf)], axis=1)
+        depth = np.clip(h[None, :, None] - starts[:, None, :], 0, (ends - starts)[:, None, :])
+        light = np.exp(-np.einsum("nhk,nkc->nhc", depth, att)) / self.white
+        curve = (lab(light.reshape(-1, 3)) * WEIGHTS).reshape(-1, 3).astype(dtype)
+        w, w2 = self._w.astype(dtype, copy=False), self._w2.astype(dtype, copy=False)
+        d2 = (curve**2).sum(1)[:, None] + w2[None, :] - 2 * (curve @ w.T)
+        return d2.reshape(len(starts), len(h), -1).min(1).astype(np.float64)
 
     def cost_of(self, filaments: list[Filament], starts: np.ndarray) -> float:
-        lin = np.array([f.linear for f in filaments])
-        return self.cost(attenuation(lin, np.array([f.td for f in filaments])), starts)
+        return self.cost(_attenuation(filaments), starts)
 
     def _starts(self, steps: np.ndarray) -> np.ndarray:
         return np.concatenate([[0.0], self.h[0] + np.cumsum(np.abs(steps))])
@@ -236,79 +274,77 @@ class Fitter:
         )
         return unpack(res.x if res.fun < f(x0) else x0)
 
-    def heights_for(self, filaments: list[Filament], starts0: np.ndarray) -> np.ndarray:
-        """Change heights for fixed filaments; never worse than starts0."""
-        from scipy.optimize import minimize
-
-        if len(filaments) == 1:
-            return np.array([0.0])
-        lin = np.array([f.linear for f in filaments])
-        att = attenuation(lin, np.array([f.td for f in filaments]))
-        span = self.h[-1] - self.h[0]
-        x0 = self._steps(starts0)
-        res = minimize(
-            lambda x: self.cost(att, self._starts(x)),
-            x0,
-            method="Powell",
-            bounds=[(0.05, span)] * (len(filaments) - 1),
-            options={"maxfev": 2000, "xtol": 1e-3, "ftol": 1e-5},
-        )
-        best = res.x if res.fun < self.cost(att, self._starts(x0)) else x0
-        return self._starts(best)
-
     def choose(
         self,
         targets: list[tuple[list[Filament], np.ndarray]],
         choices: list[Filament],
-        rounds: int = 4,
+        rounds: int = 6,
     ) -> tuple[list[Filament], np.ndarray]:
         """Real filaments for target colours (with their change heights).
 
-        Start from the closest colours. Then, one position at a time, try every filament at
-        every layer top between its neighbours' changes and keep the pair (filament, height)
-        that brings the whole print closest to the photo; fit all heights again after each
-        round. Choosing the filament with the heights fixed got stuck: a dark filament low in
-        the stack hides every change above it, and a 4-colour plan ended with 2 filaments.
-        It runs once per target and keeps the best. The base comes from the light, neutral,
-        translucent filaments, if the list has any."""
+        Start from the closest colours, with the changes on layer tops. Then take one
+        position at a time. Try every filament there, at every layer top between the
+        changes below and above it, and keep the best pair. Repeat until nothing changes.
+        Every change stays on a layer top, so every cost we compare is the cost of a plan
+        that can print. (Choosing the filament with the heights fixed got stuck: a dark
+        filament low in the stack hides every change above it.) The search runs once per
+        target and keeps the best. The base comes from the light, neutral, translucent
+        filaments, if the list has any."""
         bases = [c for c in choices if is_base(c)] or choices
         found = []
         for wanted, starts in targets:
             options = [bases] + [choices] * (len(wanted) - 1)
             picked = [nearest(f.linear, opts)[0] for f, opts in zip(wanted, options)]
-            starts = np.concatenate([[0.0], _snap(np.asarray(starts, float)[1:], self.h)])
-            best = self.cost_of(picked, starts)
+            starts = _snapped(starts, self.h)
+            best = float(self.costs(_attenuation(picked), starts[None])[0])  # as the moves
             for _ in range(rounds):
                 moved = False
                 for i, opts in enumerate(options):
-                    for c, z in self._moves(i, opts, starts):
-                        trial = [*picked[:i], c, *picked[i + 1 :]]
-                        trial_starts = starts.copy()
-                        trial_starts[i] = z
-                        cost = self.cost_of(trial, trial_starts)
-                        if cost < best - 1e-9:
-                            best, picked, starts, moved = cost, trial, trial_starts, True
-                refit = self.heights_for(picked, starts)
-                if self.cost_of(picked, refit) < best:
-                    best, starts = self.cost_of(picked, refit), refit
+                    found_i = self._best_move(i, opts, picked, starts)
+                    if found_i is not None and found_i[0] < best - 1e-9:
+                        best, picked, starts = found_i
+                        moved = True
                 if not moved:
                     break
             found.append((best, picked, starts))
         _, picked, starts = min(found, key=lambda f: f[0])
         return picked, starts
 
-    def _moves(self, i: int, options: list[Filament], starts: np.ndarray):
-        """Every filament at every layer top where position i can start (the base at 0)."""
+    def _best_move(self, i: int, options: list[Filament], picked: list[Filament], starts):
+        """The best (cost, filaments, starts) with any filament of `options` at position i,
+        starting at any layer top it may use. Heights at or below the change under i do not
+        depend on that choice, so their distances are computed once."""
+        heights = self._heights(i, starts)
+        if not len(heights):
+            return None
+        floor = starts[i - 1] + 1e-9 if i > 0 else -np.inf
+        low, high = self.h[self.h <= floor], self.h[self.h > floor]
+        below = None
+        if len(low):
+            now = _attenuation(picked)[None]
+            below = self._nearest_d2(now, starts[None], low)[0]
+        base_att = _attenuation(picked)
+        att = np.repeat(base_att[None], len(options) * len(heights), axis=0)
+        att[:, i] = np.repeat(_attenuation(options), len(heights), axis=0)
+        batch = np.tile(starts, (len(options) * len(heights), 1))
+        batch[:, i] = np.tile(heights, len(options))
+        costs = self.costs(att, batch, high, below)
+        j = int(np.argmin(costs))
+        trial = [*picked[:i], options[j // len(heights)], *picked[i + 1 :]]
+        return float(costs[j]), trial, batch[j].copy()
+
+    def _heights(self, i: int, starts: np.ndarray) -> np.ndarray:
+        """The layer tops where position i can start: between the changes below and above
+        it, never the top layer (a change there would print nothing). The base starts at 0."""
         if i == 0:
-            heights = [0.0]
-        else:
-            above = starts[i + 1] if i + 1 < len(starts) else np.inf
-            tops = self.h[:-1]  # a change at the top layer would print nothing
-            heights = tops[(tops > starts[i - 1] + 1e-9) & (tops < above - 1e-9)]
-        return [(c, float(z)) for c in options for z in heights]
+            return np.array([0.0])
+        above = starts[i + 1] if i + 1 < len(starts) else np.inf
+        tops = self.h[:-1]
+        return tops[(tops > starts[i - 1] + 1e-9) & (tops < above - 1e-9)]
 
 
 WEIGHTS = np.array([1.5, 1.0, 1.0])  # lightness counts a little more than hue
+CHUNK = 4_000_000  # distances computed at once in Fitter.costs (about 32 MB)
 TD_RANGE = (0.2, 12.0)  # mm: from black to very translucent filament
 BASE_TD = (2.0, 12.0)  # the base lets the light through
 BASE_GREY = (0.5, 0.99)  # linear grey level of the base: white to light grey
@@ -448,6 +484,7 @@ class Plan:
     real: Fit
     matches: list[tuple[Filament, float]]  # per ideal colour: closest filament, Delta E
     source: str  # where the real filaments come from
+    available: int = 0  # how many filaments the plan could choose from
 
 
 def _merge(filaments: list[Filament], starts: np.ndarray):
@@ -468,7 +505,7 @@ def _used(starts: np.ndarray, h: np.ndarray) -> list[int]:
 
 def _on_layers(filaments: list[Filament], starts: np.ndarray, h: np.ndarray):
     """Changes snapped to layer tops, without the filaments that no point holds."""
-    starts = np.concatenate([[0.0], _snap(starts[1:], h)])
+    starts = _snapped(starts, h)
     keep = _used(starts, h)
     return [filaments[i] for i in keep], starts[keep], keep
 
@@ -514,7 +551,8 @@ def plan(
     real, real_starts, _ = _on_layers(real, real_starts, h)
     real, real_starts = _merge(real, real_starts)
     ideal_fit = evaluate(ideal, starts, h, target_lab)
-    return Plan(ideal_fit, evaluate(real, real_starts, h, target_lab), matches, source)
+    real_fit = evaluate(real, real_starts, h, target_lab)
+    return Plan(ideal_fit, real_fit, matches, source, len(choices))
 
 
 def target(rgb: np.ndarray, levels=(0.5, 99.5), gamma: float = 1.0) -> np.ndarray:

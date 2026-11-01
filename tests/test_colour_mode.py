@@ -55,6 +55,29 @@ def test_colour_make(sunset_photo, setup, petg, tmp_path, no_slicer, shape):
     assert plan["optics"] is None and plan["color_range_mm"] == [lo, hi]
 
 
+def test_short_list_note(sunset_photo, setup, petg, tmp_path, no_slicer):
+    """With fewer filaments in the list than colours, the note blames the list."""
+    own = tmp_path / "two.toml"
+    own.write_text(
+        '[[filament]]\nname = "white"\nhex = "#ECE8DC"\ntd = 3.4\n'
+        '[[filament]]\nname = "red"\nhex = "#BB2E32"\ntd = 2.6\n',
+        encoding="utf-8",
+    )
+    j = Job(
+        photo=sunset_photo,
+        setup=setup,
+        optics=petg,
+        out=tmp_path / "out",
+        mode="color",
+        colors=4,
+        filaments=own,
+        width=40,
+        pitch=0.5,
+    )
+    notes = " ".join(forge.make(j).notes)
+    assert "only 2 filaments for 4 colours" in notes and "search found no place" not in notes
+
+
 def test_colour_mode_checks(setup, petg, tmp_path):
     with pytest.raises(ValueError, match="lying"):
         Job(photo=tmp_path / "x", setup=setup, optics=petg, mode="color", shape="curved").check()
