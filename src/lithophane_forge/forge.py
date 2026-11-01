@@ -169,17 +169,24 @@ def layout(job: Job, photo_aspect: float) -> Layout:
     return Layout(width, height, rows, cols, pitch, box, outline, radius)
 
 
-def thickness_map(job: Job, rgb: np.ndarray, lay: Layout) -> tuple[np.ndarray, np.ndarray]:
-    """The thickness at every grid point as the viewer sees it (row 0 at the top), and the
-    framed photo it comes from."""
+def picture_cells(job: Job, lay: Layout) -> tuple[np.ndarray, np.ndarray, int]:
+    """The grid rows and columns that hold the picture (row 0 at the top), and how many
+    copies of the photo go around (a cylinder with --repeat)."""
     wrap = job.shape == "cylinder"
     u = np.arange(lay.cols) * lay.width / lay.cols if wrap else np.linspace(0, lay.width, lay.cols)
     v = np.linspace(lay.height, 0, lay.rows)  # row 0 at the top
     u0, u1, v0, v1 = lay.photo_box
     in_u = (u >= u0 - 1e-9) & (u <= u1 + 1e-9)
     in_v = (v >= v0 - 1e-9) & (v <= v1 + 1e-9)
+    return in_v, in_u, job.repeat if wrap else 1
+
+
+def thickness_map(job: Job, rgb: np.ndarray, lay: Layout) -> tuple[np.ndarray, np.ndarray]:
+    """The thickness at every grid point as the viewer sees it (row 0 at the top), and the
+    framed photo it comes from."""
+    in_v, in_u, copies = picture_cells(job, lay)
+    u0, u1, v0, v1 = lay.photo_box
     ci, ri = int(in_u.sum()), int(in_v.sum())
-    copies = job.repeat if wrap else 1
     per_copy = math.ceil(ci / copies)
     photo = image.frame(rgb, (u1 - u0) / copies / (v1 - v0), job.crop)
     light = image.light_map(image.resize(photo, ri, per_copy), job.tone)
@@ -333,14 +340,17 @@ def make(job: Job) -> Result:
     t_view, photo = thickness_map(job, rgb, lay)
     if job.standing:
         t_view = limit_overhangs(t_view, job.max_overhang, lay.height / (lay.rows - 1))
-    res.notes += image.analyse(photo, (lay.rows, lay.cols)).notes
+    in_v, in_u, copies = picture_cells(job, lay)  # the grid one copy of the photo fills
+    res.notes += image.analyse(photo, (int(in_v.sum()), math.ceil(in_u.sum() / copies))).notes
     if job.shape == "cylinder":
         res.notes += cylinder_notes(job, lay, cropped.shape[1] / cropped.shape[0])
     parts = place(volumes(job, lay, t_view), job.setup.bed, BRIM if job.standing else 0.0)
     whole = mesh.merge([m for _, m in parts])
     res.size = tuple(float(s) for s in whole.size)
     res.triangles = len(whole.faces)
-    res.volume_cm3 = parts[0][1].volume() / 1000
+    # every part counts; where they join they overlap a little, so this is slightly more
+    # than the plastic (PrusaSlicer's estimate is exact)
+    res.volume_cm3 = sum(m.volume() for _, m in parts) / 1000
 
     folder = job.folder
     folder.mkdir(parents=True, exist_ok=True)
@@ -525,10 +535,16 @@ def report(job: Job, res: Result) -> str:
     if job.standing:
         lines.append("- It prints standing, with a brim. Remove the brim with care.")
     else:
-        lines.append(
-            "- It prints lying on the bed, flat face down: that face is the one you "
-            "look at, so a smooth or satin sheet gives the cleanest result."
-        )
+        if job.view == "flat":
+            lines.append(
+                "- It prints lying on the bed, flat face down: that face is the one you "
+                "look at, so a smooth or satin sheet gives the cleanest result."
+            )
+        else:
+            lines.append(
+                "- It prints lying on the bed, flat face down. The relief side looks at you "
+                "(--view relief); the flat face goes toward the light."
+            )
     if s.material == "petg":
         lines.append(
             "- PETG: use the textured sheet, or a release agent on the smooth sheet. "
