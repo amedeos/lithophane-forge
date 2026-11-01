@@ -36,6 +36,70 @@ uv run lithophane-forge make photo.jpg --height 80 --gamma 0.8 --clahe 0.01
 uv run lithophane-forge printers                          # supported printers and presets
 ```
 
+## Step by step
+
+From a photo on your computer to a lit lithophane on your shelf. The examples use an Original Prusa MK4 and white PETG, the defaults.
+
+### 1. Install
+
+Install [uv](https://docs.astral.sh/uv/) and [PrusaSlicer](https://github.com/prusa3d/PrusaSlicer/releases) 2.9, then get the tool:
+
+```sh
+git clone https://github.com/amedeos/lithophane-forge.git
+cd lithophane-forge
+uv sync
+uv run lithophane-forge printers                          # checks PrusaSlicer's presets
+```
+
+If `printers` cannot find PrusaSlicer's profiles, set `LITHOPHANE_FORGE_PROFILES` to the folder that holds `PrusaResearch.ini`. If PrusaSlicer is not on the PATH (for example the Flatpak), set `PRUSA_SLICER` as shown under Requirements.
+
+### 2. Calibrate your white filament (once per spool)
+
+```sh
+uv run lithophane-forge calibrate --slice
+```
+
+Print `out/calibration-petg/calibration-petg.bgcode` (about 1 hour 20 minutes on the MK4), hold the strip against the light you will use, and follow `out/calibration-petg/report.md`. Write down three numbers: `--t-min`, `--t-max` and `--td`. Without them the tool uses estimates for white PETG, which work, but your own numbers give truer tones.
+
+### 3. Choose a photo and check it
+
+Copy the photo into `photos/` (git ignores it) and ask for advice:
+
+```sh
+uv run lithophane-forge analyze photos/lake.jpg
+```
+
+Good photos have a clear subject, good contrast and few large black areas: black prints at full thickness and shows no detail. A lithophane shows only lightness, so a blue sky and green grass of the same lightness look the same. `analyze` warns you about these cases.
+
+### 4. Make the lithophane
+
+```sh
+uv run lithophane-forge make photos/lake.jpg --width 120 --t-min 0.8 --t-max 3.4 --td 2.1 --slice
+```
+
+Use your own numbers from step 2. `--width` or `--height` sets the size in mm; `--shape curved`, `cylinder` or `shaped` change the form (see Options). Everything lands in `out/lake/`.
+
+### 5. Look before you print
+
+Open `out/lake/preview.png`: it shows the photo, the panel lit from behind (simulated) and the relief. If the picture is too dark, try `--gamma 0.8`; if it is flat, try `--clahe 0.01`; to keep only part of the photo, use `--crop X,Y,W,H`. Run `make` again until you like the preview: with `--slice` it takes about a minute.
+
+### 6. Print
+
+Copy `out/lake/lake.bgcode` to the printer (USB stick, PrusaLink or Prusa Connect), or open `out/lake/lake.3mf` in PrusaSlicer to check it first. Load white PETG. A flat, curved or cylinder panel prints standing with a brim; a 120 mm panel takes about 3 to 5 hours. `out/lake/report.md` sums up the settings and the estimate.
+
+### 7. Light it
+
+Remove the brim with care and put a diffuse, neutral white LED (about 4000 K) behind the panel. By default the flat face looks at you.
+
+### 8. Try colour (optional)
+
+```sh
+uv run lithophane-forge analyze photos/sunset.jpg --colors 4
+uv run lithophane-forge make photos/sunset.jpg --mode color --colors 4 --width 120 --slice
+```
+
+Sunsets, portraits and sepia photos work best (see Colour lithophanes). `out/sunset/report.md` lists the filament to load first and the height of every change. The printer stops at each change (M600) and asks you to load the next filament. The panel prints lying, in about 2 hours for 120 mm.
+
 ## Output
 
 Put the photos you want to try in `photos/`: git ignores everything in it, so your own photos never end up in the repository. Everything the tool makes goes to `out/<name>/` (also ignored), where `<name>` is the photo's name (or `--name`).
