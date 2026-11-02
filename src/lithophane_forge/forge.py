@@ -12,6 +12,7 @@ import numpy as np
 from . import image, mesh, profiles, render, slicer, threemf
 from .image import Tone
 from .optics import Optics
+from .palette import LIGHTS
 from .printers import Setup
 
 SHAPES = ("flat", "curved", "cylinder", "shaped")
@@ -41,6 +42,7 @@ class Job:
     filaments: Path | None = None  # colour mode: your own filaments instead of the catalog
     allow_abrasive: bool = False  # colour mode: also suggest abrasive filaments
     color_range: tuple[float, float] = COLOR_RANGE
+    light: str = "back"  # colour mode: "front" for a picture you look at in room light
     width: float | None = None  # outer size in mm, frame included
     height: float | None = None
     arc: float = 120.0  # degrees, for shape="curved"
@@ -51,7 +53,7 @@ class Job:
     frame_t: float | None = None  # frame thickness; default t_max + 0.8
     pitch: float = 0.2  # mm between grid points
     max_triangles: int = 1_000_000
-    view: str = "flat"  # the face that looks at the viewer
+    view: str | None = None  # the face that looks at the viewer; None: from the light
     max_overhang: float = 60.0  # degrees from vertical on the relief side (90: no limit)
     crop: tuple[int, int, int, int] | None = None
     tone: Tone = field(default_factory=Tone)
@@ -62,9 +64,22 @@ class Job:
     led_h: float = 18.0
     slice: bool = False
 
+    def __post_init__(self):
+        if self.view is None:  # in room light you see the top face; a lithophane the bed's
+            object.__setattr__(self, "view", "relief" if self.light == "front" else "flat")
+
     @property
     def stem(self) -> str:
         return self.name or self.photo.stem
+
+    @property
+    def front_lit(self) -> bool:
+        """A colour picture for room light (check() allows front light only in colour)."""
+        return self.light == "front"
+
+    def part_name(self, name: str) -> str:
+        """How the output names a part: the panel is a picture when it is front-lit."""
+        return "picture" if name == "lithophane" and self.front_lit else name
 
     @property
     def folder(self) -> Path:
@@ -74,7 +89,7 @@ class Job:
     def frame_thickness(self) -> float:
         if self.frame_t is not None:
             return self.frame_t
-        if self.mode == "color":  # the whole stack: the frame shows the darkest colour
+        if self.mode == "color":  # the whole stack: the frame shows the top of the path
             return self.color_range[1]
         return round(self.optics.t_max + 0.8, 2)
 
@@ -87,6 +102,19 @@ class Job:
             raise ValueError(f"unknown shape {self.shape!r}; choose from {', '.join(SHAPES)}")
         if self.mode not in MODES:
             raise ValueError(f"unknown mode {self.mode!r}; choose from {', '.join(MODES)}")
+        if self.light not in LIGHTS:
+            raise ValueError(f"unknown light {self.light!r}; choose from {', '.join(LIGHTS)}")
+        if self.front_lit:
+            if self.mode != "color":
+                raise ValueError(
+                    "--light front is for colour prints; a white print (--mode mono) is a "
+                    "lithophane and needs light from behind"
+                )
+            if self.view != "relief":
+                raise ValueError(
+                    "with light from the front you look at the top face (--view relief): "
+                    "the flat face lies on the bed and shows only the first filament"
+                )
         if self.mode == "color":
             if self.shape not in ("flat", "shaped"):
                 raise ValueError("colour panels print lying: use --shape flat or shaped")
@@ -270,7 +298,7 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     lo, hi = job.color_range
     h = palette.heights(lo, hi, job.setup.first_layer, job.setup.layer)
     choices, source = palette.choices(job.filaments, job.allow_abrasive)
-    plan = palette.plan(target, job.colors, h, choices, source)
+    plan = palette.plan(target, job.colors, h, choices, source, job.light)
     real_idx = median_filter(palette.assign(target, palette.lab(plan.real.colours)), size=3)
     ideal_idx = palette.assign(target, palette.lab(plan.ideal.colours))
     r0, c0 = int(np.argmax(in_v)), int(np.argmax(in_u))
@@ -443,11 +471,8 @@ def make(job: Job) -> Result:
     if job.standing:
         t_view = limit_overhangs(t_view, job.max_overhang, lay.height / (lay.rows - 1))
     in_v, in_u, copies = picture_cells(job, lay)  # the grid one copy of the photo fills
-    res.notes += [
-        n
-        for n in image.analyse(photo, (int(in_v.sum()), math.ceil(in_u.sum() / copies))).notes
-        if not (cmap and "colourful" in n)
-    ]
+    grid = (int(in_v.sum()), math.ceil(in_u.sum() / copies))
+    res.notes += image.analyse(photo, grid, colour=job.mode == "color").notes
     if job.shape == "cylinder":
         res.notes += cylinder_notes(job, lay, cropped.shape[1] / cropped.shape[0])
     parts = place(volumes(job, lay, t_view), job.setup.bed, BRIM if job.standing else 0.0)
@@ -479,11 +504,12 @@ def make(job: Job) -> Result:
         ]
     else:
         lit = render.colour(with_frame(cmap.real, inner, cmap.plan.real), mask)
+        lit_by = "room light" if job.front_lit else "lit from behind"
         ideal = with_frame(cmap.ideal, inner, cmap.plan.ideal)
         panels = [
             ("photo", render._u8(photo)),
-            ("ideal colours (simulated)", render.colour(ideal, mask)),
-            ("suggested filaments (simulated)", lit),
+            (f"ideal colours (simulated, {lit_by})", render.colour(ideal, mask)),
+            (f"suggested filaments (simulated, {lit_by})", lit),
             ("filament changes", render.palette_strip(cmap.plan, job.setup.layer)),
         ]
     res.files["preview"] = render.sheet(panels, folder / "preview.png")
@@ -530,13 +556,17 @@ def make(job: Job) -> Result:
     return res
 
 
+PATHS = {"back": "from light to dark", "front": "from the first filament to the last"}
+
+
 def colour_notes(job: Job, plan) -> list[str]:
     notes = []
     if plan.real.mean_de > 15:
         notes.append(
             f"the print will differ from the photo (mean Delta E {plan.real.mean_de:.0f}):"
-            " one extruder can only follow one path of colours, from light to dark, "
-            "and this photo's colours do not lie on one path; see preview.png, or try "
+            " one extruder can only follow one path of colours, "
+            + PATHS[job.light]
+            + ", and this photo's colours do not lie on one path; see preview.png, or try "
             "--colors with one more filament"
         )
     used = len(plan.real.filaments)
@@ -555,7 +585,46 @@ def colour_notes(job: Job, plan) -> list[str]:
             "the suggested filaments come from the Prusament PETG table; pass "
             "--filaments with your own list for another material"
         )
-    return notes
+    return notes + base_notes(job, plan)
+
+
+def base_notes(job: Job, plan) -> list[str]:
+    """What limits the first filament. In room light it must hide what is behind the
+    panel at the thinnest point; lit from behind it should be light, neutral and
+    translucent. The search takes such a filament if the list has one."""
+    from . import palette
+
+    h0 = float(plan.real.heights[0])
+    light = palette.light_model(job.light, plan.real.heights)
+    base = plan.real.filaments[0]
+    if not light.is_base(base) and job.front_lit:
+        return [
+            (
+                f"no filament in the list hides what is behind the panel at its thinnest point "
+                f"({h0:g} mm needs a TD of at most {light.base_td[1]:g} mm), so the first "
+                f"filament, {base.name} (TD {base.td:g}), lets the wall behind it show through; "
+                "add an opaque filament to the list or raise --t-min"
+            )
+        ]
+    if not light.is_base(base):
+        return [
+            (
+                "no filament in the list is light, neutral and translucent, so the first "
+                f"filament, {base.name}, tints every point of the lithophane"
+            )
+        ]
+    light_ones = [f for f in plan.choices if palette.lab(f.linear)[0] >= palette.LIGHT_L]
+    if job.front_lit and light_ones and not any(light.is_base(f) for f in light_ones):
+        f = min(light_ones, key=lambda f: f.td)
+        need = math.ceil(f.td * palette.COVER / job.setup.layer - 1e-9) * job.setup.layer
+        return [
+            (
+                f"at {h0:g} mm, the thinnest point, only a filament with a TD of at most "
+                f"{light.base_td[1]:g} mm hides what is behind the panel, so no light filament "
+                f"can be the first one; --t-min {need:g} lets {f.name} (TD {f.td:g}) be the first"
+            )
+        ]
+    return []
 
 
 def cylinder_notes(job: Job, lay: Layout, photo_aspect: float) -> list[str]:
@@ -573,7 +642,8 @@ def cylinder_notes(job: Job, lay: Layout, photo_aspect: float) -> list[str]:
 
 def with_frame(sim: np.ndarray, inner: np.ndarray | None, fit) -> np.ndarray:
     """A simulated colour print with the frame of a shaped panel: outside `inner` the frame
-    volume covers the picture with the whole stack (the darkest colour of the path)."""
+    volume covers the picture with the whole stack (the last colour of the path: the
+    darkest lit from behind, the top filament in room light)."""
     if inner is None:
         return sim
     return np.where(inner[..., None], sim, fit.colours[-1])
@@ -691,6 +761,7 @@ def write_plan(job: Job, res: Result) -> None:
         "pitch_mm": round(lay.pitch, 4),
         "optics": asdict(job.optics) if job.mode == "mono" else None,
         "color_range_mm": list(job.color_range) if job.mode == "color" else None,
+        "light": job.light,
         "tone": asdict(job.tone),
         "printer": {
             "key": s.printer.key,
@@ -746,11 +817,16 @@ def colour_report(job: Job, res: Result) -> list[str]:
     ]
     for k, (i, (f, d)) in enumerate(zip(p.ideal.filaments, p.matches), start=1):
         lines.append(f"| {k} | {i.hex} | {i.td:g} | {f.name} ({f.hex}, TD {f.td:g}) | {d:.0f} |")
+    hides = (
+        " Lit from the front, a filament hides what lies under it from about a tenth of its TD on."
+        if job.front_lit
+        else ""
+    )
     lines += [
         "",
         (
             f"Filaments from: {p.source}. TD is the thickness that lets about 10 % of the "
-            "light through; a small TD is an opaque filament."
+            f"light through; a small TD is an opaque filament.{hides}"
         ),
         "",
     ]
@@ -766,11 +842,12 @@ def report(job: Job, res: Result) -> str:
         "cylinder": f"cylinder, {2 * (lay.radius or 0):.0f} mm across",
         "shaped": f"{Path(job.mask).name if Path(job.mask).suffix else job.mask} panel",
     }
+    kind = "Colour picture" if job.front_lit else "Lithophane"
     lines = [
         f"# {job.stem}",
         "",
         (
-            f"Lithophane from `{job.photo.name}`: {what[job.shape]}, {lay.width:.1f} x "
+            f"{kind} from `{job.photo.name}`: {what[job.shape]}, {lay.width:.1f} x "
             f"{lay.height:.1f} mm (frame {job.frame:g} mm), thickness {t_min:g} to "
             f"{t_max:g} mm."
         ),
@@ -794,7 +871,12 @@ def report(job: Job, res: Result) -> str:
     if job.standing:
         lines.append("- It prints standing, with a brim. Remove the brim with care.")
     else:
-        if job.view == "flat":
+        if job.front_lit:
+            lines.append(
+                "- It prints lying on the bed, flat face down. You look at the top face, the "
+                "last one printed: PrusaSlicer shows it as you will see it, not mirrored."
+            )
+        elif job.view == "flat":
             lines.append(
                 "- It prints lying on the bed, flat face down: that face is the one you "
                 "look at, so a smooth or satin sheet gives the cleanest result."
@@ -811,7 +893,8 @@ def report(job: Job, res: Result) -> str:
         )
     for name, info in res.sliced.items():
         lines.append(
-            f"- PrusaSlicer estimate for the {name}: {info['time']}, {info['filament_g']} g."
+            f"- PrusaSlicer estimate for the {job.part_name(name)}: {info['time']}, "
+            f"{info['filament_g']} g."
         )
     if "stand" in res.accessories:
         a = res.accessories["stand"]
@@ -826,17 +909,24 @@ def report(job: Job, res: Result) -> str:
             f"takes an LED tealight or puck light up to {a['led_pocket_mm'][0] - 1:g} "
             f"mm across and {a['led_pocket_mm'][1]:g} mm tall; the notch takes a cable."
         )
-    lines += [
-        "",
-        "## Look at it",
-        "",
-        (
-            f"- The {'flat' if job.view == 'flat' else 'relief'} face looks at you; put the "
-            "light behind the other face. A diffuse, neutral white LED (about 4000 K) works best."
-        ),
-        "- `preview.png` simulates the lit panel.",
-        "",
-    ]
+    if job.front_lit:
+        look = [
+            (
+                "- Look at the top face like a photo, in daylight or under a neutral white "
+                "lamp in front of it. It needs no light behind it."
+            ),
+            "- `preview.png` simulates it in room light.",
+        ]
+    else:
+        look = [
+            (
+                f"- The {'flat' if job.view == 'flat' else 'relief'} face looks at you; put "
+                "the light behind the other face. A diffuse, neutral white LED (about 4000 K) "
+                "works best."
+            ),
+            "- `preview.png` simulates the lit panel.",
+        ]
+    lines += ["", "## Look at it", "", *look, ""]
     if res.notes:
         lines += ["## Notes", ""] + [f"- {n}" for n in res.notes] + [""]
     return "\n".join(lines)
