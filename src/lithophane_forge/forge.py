@@ -42,6 +42,7 @@ class Job:
     colors: int = 4  # colour mode: number of filaments
     filaments: Path | None = None  # colour mode: your own filaments instead of the catalog
     allow_abrasive: bool = False  # colour mode: also suggest abrasive filaments
+    allow_unmeasured: bool = False  # room light: also translucent filaments without k and s
     color_range: tuple[float, float] = COLOR_RANGE
     light: str = "back"  # colour mode: "front" for a picture you look at in room light
     min_patch: float = MIN_PATCH  # colour mode: see remove_specks (0: off)
@@ -319,7 +320,9 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
         )
     lo, hi = job.color_range
     h = palette.heights(lo, hi, job.setup.first_layer, job.setup.layer)
-    choices, source = palette.choices(job.filaments, job.allow_abrasive)
+    choices, source = palette.choices(
+        job.filaments, job.allow_abrasive, job.light, job.allow_unmeasured
+    )
     plan = palette.plan(target, job.colors, h, choices, source, job.light)
     frame = int(np.clip(np.searchsorted(h, job.frame_thickness + 1e-9) - 1, 0, len(h) - 1))
 
@@ -681,40 +684,39 @@ def colour_notes(job: Job, plan) -> list[str]:
 def base_notes(job: Job, plan) -> list[str]:
     """What limits the first filament. In room light it must hide what is behind the
     panel at the thinnest point; lit from behind it should be light, neutral and
-    translucent. The search takes such a filament if the list has one."""
+    translucent. The search takes such a filament if the list has one.
+
+    In room light a light filament needs about its TD to hide the back (Signal White
+    about 1.8 mm), so a light first filament is rare: the light colours come from light
+    filaments over a dark base. No note asks for one."""
     from . import palette
 
     h0 = float(plan.real.heights[0])
     light = palette.light_model(job.light, plan.real.heights)
     base = plan.real.filaments[0]
-    if not light.is_base(base) and job.front_lit:
+    if light.is_base(base):
+        return []
+    if job.front_lit:
+        z = light.hides_from(base)
+        fix = (
+            f"add an opaque filament to the list, or raise --t-min to {z:g} mm, where it hides it"
+            if z is not None
+            else "it does not hide it even at the full thickness of the panel: add an opaque "
+            "filament to the list"
+        )
         return [
             (
                 f"no filament in the list hides what is behind the panel at its thinnest point "
-                f"({h0:g} mm needs a TD of at most {light.base_td[1]:g} mm), so the first "
-                f"filament, {base.name} (TD {base.td:g}), lets the wall behind it show through; "
-                "add an opaque filament to the list or raise --t-min"
+                f"({h0:g} mm), so the first filament, {base.name} (TD {base.td:g}), lets the "
+                f"wall behind it show through; {fix}"
             )
         ]
-    if not light.is_base(base):
-        return [
-            (
-                "no filament in the list is light, neutral and translucent, so the first "
-                f"filament, {base.name}, tints every point of the lithophane"
-            )
-        ]
-    light_ones = [f for f in plan.choices if palette.lab(f.linear)[0] >= palette.LIGHT_L]
-    if job.front_lit and light_ones and not any(light.is_base(f) for f in light_ones):
-        f = min(light_ones, key=lambda f: f.td)
-        need = math.ceil(f.td * palette.COVER / job.setup.layer - 1e-9) * job.setup.layer
-        return [
-            (
-                f"at {h0:g} mm, the thinnest point, only a filament with a TD of at most "
-                f"{light.base_td[1]:g} mm hides what is behind the panel, so no light filament "
-                f"can be the first one; --t-min {need:g} lets {f.name} (TD {f.td:g}) be the first"
-            )
-        ]
-    return []
+    return [
+        (
+            "no filament in the list is light, neutral and translucent, so the first "
+            f"filament, {base.name}, tints every point of the lithophane"
+        )
+    ]
 
 
 def cylinder_notes(job: Job, lay: Layout, photo_aspect: float) -> list[str]:
@@ -809,10 +811,13 @@ def colour_plan(res: Result) -> dict | None:
         return None
     p = res.colour
 
+    def measured(x) -> dict:  # a filament's measured k and s, if it has them
+        return {"k": list(x.optics[0]), "s": x.optics[1]} if x.optics else {}
+
     def fit(f):
         return {
             "filaments": [
-                {"name": x.name, "hex": x.hex, "td": x.td, "from_mm": round(z, 3)}
+                {"name": x.name, "hex": x.hex, "td": x.td, **measured(x), "from_mm": round(z, 3)}
                 for x, z in zip(f.filaments, f.starts)
             ],
             "mean_delta_e": round(f.mean_de, 2),
@@ -886,9 +891,15 @@ def write_plan(job: Job, res: Result) -> None:
 def colour_report(job: Job, res: Result) -> list[str]:
     p = res.colour
     first = p.real.filaments[0]
-    lines = [f"- Load **{first.name}** ({first.hex}) before you start."]
+
+    def known(f):  # filaments with measured k and s
+        return ", measured" if f.optics else ""
+
+    lines = [f"- Load **{first.name}** ({first.hex}{known(first)}) before you start."]
     for (z, _), f in zip(res.colour_changes, p.real.filaments[1:]):
-        lines.append(f"- At Z {z:.2f} mm the printer stops (M600): load **{f.name}** ({f.hex}).")
+        lines.append(
+            f"- At Z {z:.2f} mm the printer stops (M600): load **{f.name}** ({f.hex}{known(f)})."
+        )
     lines += [
         (
             f"- With these filaments the print is a mean Delta E {p.real.mean_de:.1f} away from "
@@ -909,9 +920,14 @@ def colour_report(job: Job, res: Result) -> list[str]:
         "|---|---|---|---|---|",
     ]
     for k, (i, (f, d)) in enumerate(zip(p.ideal.filaments, p.matches), start=1):
-        lines.append(f"| {k} | {i.hex} | {i.td:g} | {f.name} ({f.hex}, TD {f.td:g}) | {d:.0f} |")
+        lines.append(
+            f"| {k} | {i.hex} | {i.td:g} | {f.name} ({f.hex}, TD {f.td:g}{known(f)}) | {d:.0f} |"
+        )
     hides = (
-        " Lit from the front, a filament hides what lies under it from about a tenth of its TD on."
+        " Lit from the front, a thin layer tints what lies under it, like coloured glass, and"
+        " a filament needs about its TD to hide it. For a filament marked measured the plan"
+        " uses its measured absorption and scattering (k and s); for the others hex and TD"
+        " are an estimate."
         if job.front_lit
         else ""
     )

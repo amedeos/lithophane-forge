@@ -102,6 +102,8 @@ def test_analyze(photo, capsys):
         (["--light", "back"], "add --colors"),
         (["--mode", "mono", "--colors", "3"], "not --mode mono"),
         (["--mode", "mono", "--light", "front"], "not --mode mono"),
+        (["--allow-unmeasured"], "add --colors"),
+        (["--colors", "3", "--light", "back", "--allow-unmeasured"], "not --light back"),
     ],
 )
 def test_analyze_options_that_do_nothing_are_errors(photo, capsys, argv, message):
@@ -136,6 +138,12 @@ def test_help_shows_no_none_defaults(capsys):
         (["make", "{photo}", "--view", "flat"], "--view relief"),
         (["make", "{photo}", "--mode", "mono", "--min-patch", "2"], "not --mode mono"),
         (["make", "{photo}", "--shape", "cylinder", "--min-patch", "2"], "cylinder (always mono)"),
+        (["make", "{photo}", "--light", "back", "--allow-unmeasured"], "not --light back"),
+        (["make", "{photo}", "--mode", "mono", "--allow-unmeasured"], "not --mode mono"),
+        (
+            ["make", "{photo}", "--shape", "curved", "--allow-unmeasured"],
+            "curved (always mono)",
+        ),
     ],
 )
 def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
@@ -179,6 +187,14 @@ def test_allow_abrasive_reaches_the_job(photo, tmp_path):
     args = parser().parse_args(["make", str(photo), "--mode", "color", "--allow-abrasive"])
     assert job_from(args).allow_abrasive
     assert not job_from(parser().parse_args(["make", str(photo)])).allow_abrasive
+
+
+def test_allow_unmeasured_reaches_the_job(photo):
+    from lithophane_forge import job_from, parser
+
+    args = parser().parse_args(["make", str(photo), "--allow-unmeasured"])
+    assert job_from(args).allow_unmeasured
+    assert not job_from(parser().parse_args(["make", str(photo)])).allow_unmeasured
 
 
 @pytest.mark.parametrize("command", ["make", "analyze"])

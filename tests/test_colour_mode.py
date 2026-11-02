@@ -163,28 +163,35 @@ def base_notes_for(photo, setup, petg, tmp_path, **kw):
 
 def test_a_clear_base_is_a_note(sunset_photo, setup, petg, tmp_path, no_slicer):
     """In room light the first filament must hide what is behind the panel; with only
-    clear filaments in the list, the note says the wall shows through."""
+    clear filaments in the list (allowed, although nothing measured them), the note says
+    the wall shows through."""
     own = tmp_path / "clear.toml"
     own.write_text(
         '[[filament]]\nname = "clear"\nhex = "#E4E7E3"\ntd = 100\n'
         '[[filament]]\nname = "smoke"\nhex = "#444444"\ntd = 20\n',
         encoding="utf-8",
     )
-    notes = base_notes_for(sunset_photo, setup, petg, tmp_path, light="front", filaments=own)
-    assert "show through" in notes
+    notes = base_notes_for(
+        sunset_photo, setup, petg, tmp_path, light="front", filaments=own, allow_unmeasured=True
+    )
+    assert "show through" in notes and "even at the full thickness" in notes
     notes = base_notes_for(sunset_photo, setup, petg, tmp_path, light="back", filaments=own)
     assert "tints every point" not in notes  # clear is light, neutral and translucent
 
 
-def test_a_thin_panel_cannot_start_with_white(sunset_photo, setup, petg, tmp_path, no_slicer):
-    """At 0.3 mm only a TD up to 3 mm hides the back: Signal White (3.4) cannot be the
-    first filament, and the note says which --t-min allows it."""
-    notes = base_notes_for(
-        sunset_photo, setup, petg, tmp_path, light="front", color_range=(0.3, 2.0)
-    )
-    assert "--t-min 0.4 lets Prusament PETG Signal White" in notes
+def test_the_default_base_hides_the_back(sunset_photo, setup, petg, tmp_path, no_slicer):
+    """In room light only opaque filaments hide the back at 0.6 mm (Signal White needs
+    about 1.8 mm): the plan starts with one, and no note asks for another first filament."""
     notes = base_notes_for(sunset_photo, setup, petg, tmp_path, light="front")
-    assert "first one" not in notes and "show through" not in notes
+    assert "show through" not in notes and "--t-min" not in notes
+
+
+def test_a_translucent_base_names_the_t_min(sunset_photo, setup, petg, tmp_path, no_slicer):
+    """With only white in the list, the note says from which thickness it hides the back."""
+    own = tmp_path / "white.toml"
+    own.write_text('[[filament]]\nname = "white"\nhex = "#E5E0E1"\ntd = 3.4\n', encoding="utf-8")
+    notes = base_notes_for(sunset_photo, setup, petg, tmp_path, light="front", filaments=own)
+    assert "show through" in notes and "raise --t-min to 1.8 mm" in notes
 
 
 def test_front_light_reads_the_right_way(setup, petg, tmp_path):

@@ -24,18 +24,22 @@ transmission distance td lets through exp(-t * a) per channel, with
 a = ln(10) / td * ln(c) / ln(Y(c)). For a grey, a is the same on every channel and t = td
 lets 10 % through; a coloured filament lets its own colour through more than the others.
 
-Light from the front (see `coverage`): a layer of filament of thickness t hides a part
-of what lies under it, sqrt(t / (0.1 td)) and all of it from a tenth of td on. The colour
-you see moves that far (in sRGB) from the colour under it to the filament's own colour.
-The td values in the catalog come from Prusa's HueForge table, which is measured for this
-kind of print.
+Light from the front (two-flux, Kubelka-Munk, per channel): every filament absorbs (K, per
+channel) and scatters (S) light. A layer over the stack below it reflects some light
+itself and lets some through to the stack and back. A thin layer of a translucent
+filament is a colour filter over what lies under it, not a paint: thin yellow over white
+is a bright lemon, thin blue over yellow is a dark green. A filament with measured k and s
+uses them; for the others, the hex is the colour of a thick block and td the thickness
+that lets 10 % of the light through. That works for opaque and neutral filaments, but not
+for translucent coloured or nearly clear ones, so `choices` leaves those out in room light
+unless they are measured.
 """
 
 import math
 import re
 import tomllib
 from dataclasses import dataclass, field, replace
-from functools import cache
+from functools import cache, cached_property
 from importlib import resources
 from pathlib import Path
 
@@ -86,12 +90,19 @@ def luminance(lin: np.ndarray) -> np.ndarray:
     return lin @ np.array([0.2126, 0.7152, 0.0722])
 
 
+def chroma(lin: np.ndarray) -> np.ndarray:
+    """CIELAB chroma of linear colours: 0 for a grey."""
+    lab_ = lab(lin)
+    return np.hypot(lab_[..., 1], lab_[..., 2])
+
+
 @dataclass(frozen=True)
 class Filament:
     name: str
     hex: str
     td: float  # mm that let through about 10 % of the light
     abrasive: bool = False  # needs a hardened steel nozzle (for example tungsten-filled)
+    optics: tuple[tuple[float, float, float], float] | None = None  # measured K (r, g, b), S
 
     @property
     def linear(self) -> np.ndarray:
@@ -101,6 +112,33 @@ class Filament:
 def _arrays(filaments: list["Filament"]) -> tuple[np.ndarray, np.ndarray]:
     """Linear colours (k, 3) and td (k,) of filaments."""
     return np.array([f.linear for f in filaments]), np.array([f.td for f in filaments])
+
+
+def _optics(filaments: list["Filament"]) -> np.ndarray:
+    """Measured K (3 channels) and S of filaments, (k, 4): NaN where a filament has none."""
+    out = np.full((len(filaments), 4), np.nan)
+    for i, f in enumerate(filaments):
+        if f.optics is not None:
+            out[i] = [*f.optics[0], f.optics[1]]
+    return out
+
+
+OPAQUE_TD = 1.0  # mm: hex and td predict a filament at least this opaque
+NEUTRAL_CHROMA = 12  # CIELAB chroma up to which a filament counts as neutral
+NEUTRAL_TD = 4.0  # mm: a neutral filament up to this td (Signal White: 3.4) scatters enough
+# for its hex to be the colour of a thick block; natural and clear filaments do not
+
+
+def predictable(f: Filament) -> bool:
+    """Light from the front: can we predict how this filament looks? Yes when it has
+    measured k and s, when it is opaque (td up to OPAQUE_TD), or neutral and not too clear
+    (white or grey, td up to NEUTRAL_TD). A translucent coloured filament is a colour
+    filter: one td cannot say how much it absorbs on each channel. The hex of a nearly
+    clear filament (natural, clear) says little about how much it scatters: the model
+    would make thin natural PETG a white veil."""
+    if f.optics is not None or f.td <= OPAQUE_TD:
+        return True
+    return f.td <= NEUTRAL_TD and bool(chroma(f.linear) <= NEUTRAL_CHROMA)
 
 
 def attenuation(lin: np.ndarray, td: np.ndarray) -> np.ndarray:
@@ -150,19 +188,62 @@ def _exposure(h_min: float) -> float:
 
 
 LIGHTS = ("front", "back")  # front: a picture in room light; back: a lithophane
-COVER = 0.1  # light from the front: a filament hides what lies under it from COVER x td
+TD_THROUGH = 0.1  # the share of the light that td mm of filament let through
+# Light from the front: a base hides what is behind the panel when it looks the same, within
+# HIDE_DE, over a black wall and over a white one (reflectance BACK_WHITE).
+HIDE_DE = 3.0
+BACK_WHITE = 0.8
+REFLECTANCE = (0.005, 0.995)  # the hex of an unmeasured filament as a thick block's colour
 
 
-def coverage(t: np.ndarray, td: np.ndarray) -> np.ndarray:
-    """Light from the front: how much of what lies under it a layer of filament of
-    thickness t hides (0 to 1).
+def reflect(a: np.ndarray, b: np.ndarray, x: np.ndarray, under: np.ndarray) -> np.ndarray:
+    """Two-flux reflectance (per channel) of a layer over a stack that reflects `under`:
+    a = 1 + K / S, b = sqrt(a² - 1), x = b S d for a layer d mm thick. This is
+    (1 - under (a - b coth x)) / (a - under + b coth x), multiplied out with e^-2x so that
+    thick layers do not overflow: x = 0 gives `under`, a thick layer gives a - b."""
+    m = -np.expm1(-2 * x)  # 1 - e^-2x
+    p = 2 - m  # 1 + e^-2x
+    return (m - under * (a * m - b * p)) / ((a - under) * m + b * p)
 
-    Front-lit prints made with HueForge's td values hide the colour below far faster than
-    td suggests: white PETG (td 3.4) hides black under about 0.34 mm. The curve
-    sqrt(t / (0.1 td)) is the calibrated model of AutoForge
-    (https://github.com/hvoss-techfak/AutoForge), without its slower curve for a dark
-    filament on a light one. It is an estimate until a test print checks it."""
-    return np.minimum(np.sqrt(np.maximum(t, 0) / (COVER * td)), 1.0)
+
+def transmit(a: np.ndarray, b: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Two-flux transmittance (per channel) of a layer: b / (a sinh x + b cosh x)."""
+    m = -np.expm1(-2 * x)
+    return 2 * b * np.exp(-x) / (a * m + b * (2 - m))
+
+
+def two_flux(lin: np.ndarray, td: np.ndarray, optics: np.ndarray | None = None) -> np.ndarray:
+    """a (3 channels), b (3) and S (1/mm) of filaments, (k, 7). A filament with measured
+    K and S (`optics`, (k, 4), NaN where there is none) uses them. For the others the
+    linear colour is the reflectance of a thick block, R = a - b, which gives K / S, and S
+    is the one that lets TD_THROUGH of the light (luminance) through td mm."""
+    lin = np.atleast_2d(np.asarray(lin, float))
+    td = np.asarray(td, float).reshape(-1)
+    r = np.clip(lin, *REFLECTANCE)
+    ks = (1 - r) ** 2 / (2 * r)
+    s = np.empty(len(td))
+    known = np.zeros(len(td), bool) if optics is None else ~np.isnan(optics).any(axis=1)
+    if (~known).any():
+        s[~known] = _scattering(ks[~known], td[~known])
+    if known.any():
+        ks[known] = optics[known, :3] / optics[known, 3:]
+        s[known] = optics[known, 3]
+    return np.concatenate([1 + ks, np.sqrt(ks * (ks + 2)), s[:, None]], axis=1)
+
+
+def _scattering(ks: np.ndarray, td: np.ndarray, steps: int = 24) -> np.ndarray:
+    """S for filaments with K / S `ks` (k, 3), so that td mm let TD_THROUGH through:
+    bisection on log(S td), for all filaments at once (the transmittance depends on S and
+    the thickness only through their product). 24 steps give S to about 1e-6. (Newton's
+    method was no faster: the channels of a coloured filament fade at very different
+    rates, and its steps often left the bracket.)"""
+    a, b = 1 + ks, np.sqrt(ks * (ks + 2))
+    lo, hi = np.full(len(td), np.log(1e-4)), np.full(len(td), np.log(1e3))
+    for _ in range(steps):
+        mid = (lo + hi) / 2
+        bright = luminance(transmit(a, b, b * np.exp(mid)[:, None])) > TD_THROUGH
+        lo, hi = np.where(bright, mid, lo), np.where(bright, hi, mid)
+    return np.exp((lo + hi) / 2) / td
 
 
 def _depths(starts: np.ndarray, h: np.ndarray) -> np.ndarray:
@@ -184,8 +265,9 @@ class Backlight:
         self.white = _exposure(h[0])
         self.base_td = BASE_TD
 
-    def props(self, lin: np.ndarray, td: np.ndarray) -> np.ndarray:
-        """What the model needs of filaments with linear colours (k, 3) and td (k,)."""
+    def props(self, lin: np.ndarray, td: np.ndarray, optics=None) -> np.ndarray:
+        """What the model needs of filaments with linear colours (k, 3) and td (k,). The
+        measured optics are for light from the front; this model does not use them."""
         return attenuation(lin, td)
 
     def seen(self, depth: np.ndarray, props: np.ndarray) -> np.ndarray:
@@ -198,35 +280,62 @@ class Backlight:
 
 
 class Frontlight:
-    """A picture in room light: you see the top of the stack (see `coverage`). The base
-    must hide what is behind the panel at its thinnest point, so its td is at most the
-    thinnest stack / COVER. Signal White, thick, is the viewer's white."""
+    """A picture in room light: you see the top of the stack (two-flux, see `reflect`).
+    The base must hide what is behind the panel at its thinnest point (`hides_from`);
+    behind it the model puts black. Signal White, thick, is the viewer's white."""
 
     name = "front"
     grey_base = False  # the base can have any colour
 
     def __init__(self, h: np.ndarray):
+        self.h = np.asarray(h, float)
         self.white = float(luminance(white().linear))
-        self.base_td = (TD_RANGE[0], min(TD_RANGE[1], float(h[0]) / COVER))
 
-    def props(self, lin: np.ndarray, td: np.ndarray) -> np.ndarray:
-        """The sRGB colour and the td of each filament: (k, 4)."""
-        srgb = linear_to_srgb(np.clip(lin, 0, 1))
-        return np.concatenate([srgb, np.asarray(td, float).reshape(-1, 1)], axis=1)
+    def props(self, lin: np.ndarray, td: np.ndarray, optics=None) -> np.ndarray:
+        """a, b and S of each filament: (k, 7) (see `two_flux`)."""
+        return two_flux(lin, td, optics)
 
     def seen(self, depth: np.ndarray, props: np.ndarray) -> np.ndarray:
-        """From the bed up, each filament moves the colour from the one under it toward its
-        own by its coverage. Unrolled: filament k shows with weight cover_k times what the
-        filaments above it leave uncovered. Behind the panel is dark (the base hides it)."""
-        srgb, td = props[..., :3], props[..., 3]
-        cover = coverage(depth, td[:, None, :])  # (n, m, k)
-        left = np.cumprod((1 - cover)[..., ::-1], axis=-1)[..., ::-1]  # uncovered from k up
-        above = np.concatenate([left[..., 1:], np.ones_like(left[..., :1])], axis=-1)
-        out = np.einsum("nmk,nkc->nmc", cover * above, srgb)
-        return srgb_to_linear(out) / self.white
+        """Linear colours (n, m, 3) of stacks with depths (n, m, k) of filaments (n, k, 7),
+        relative to the viewer's white: from the bed up, each layer over the stack below
+        it. Behind the panel is dark (the base hides it)."""
+        out = np.zeros((*depth.shape[:2], 3))
+        for k in range(depth.shape[-1]):
+            a, b, s = props[:, None, k, :3], props[:, None, k, 3:6], props[:, None, k, 6:]
+            out = reflect(a, b, b * s * depth[..., k, None], out)
+        return np.maximum(out / self.white, 0)
+
+    def hiding(self, props: np.ndarray, d: np.ndarray) -> np.ndarray:
+        """Delta E between d mm (m,) of filaments (k, 7) over a black and over a white wall:
+        (k, m). Below HIDE_DE the filament hides what is behind it."""
+        a, b, s = props[:, None, :3], props[:, None, 3:6], props[:, None, 6:]
+        x = b * s * np.asarray(d, float).reshape(1, -1, 1)
+        black, wall = (lab(reflect(a, b, x, under) / self.white) for under in (0, BACK_WHITE))
+        return delta_e2000(black, wall)
+
+    def hides_from(self, f: Filament) -> float | None:
+        """The thinnest stack (a layer top) at which the filament hides what is behind the
+        panel, or None when it does not even at the thickest."""
+        de = self.hiding(self.props(*_arrays([f]), _optics([f])), self.h)[0]
+        ok = np.flatnonzero(de < HIDE_DE)
+        return float(self.h[ok[0]]) if len(ok) else None
 
     def is_base(self, f: Filament) -> bool:
-        return f.td <= self.base_td[1] + 1e-9
+        return self.hides_from(f) == float(self.h[0])
+
+    @cached_property
+    def base_td(self) -> tuple[float, float]:
+        """The td range of the ideal base (for the fit's bounds): up to the largest td at
+        which Signal White's colour still hides the back at the thinnest point. That is the
+        loosest limit; a dark base with that td hides a little less, which the ideal colours
+        (a reference, not a print) can afford."""
+        lin = white().linear[None]
+        lo, hi = np.log(TD_RANGE[0]), np.log(TD_RANGE[1])
+        for _ in range(30):
+            mid = (lo + hi) / 2
+            hides = self.hiding(self.props(lin, [np.exp(mid)]), self.h[:1])[0, 0] < HIDE_DE
+            lo, hi = (mid, hi) if hides else (lo, mid)
+        return TD_RANGE[0], max(float(np.exp(lo)), TD_RANGE[0] * 1.05)
 
 
 def light_model(light: str, h: np.ndarray) -> Backlight | Frontlight:
@@ -238,7 +347,7 @@ def light_model(light: str, h: np.ndarray) -> Backlight | Frontlight:
 def curve(filaments: list[Filament], starts: np.ndarray, h: np.ndarray, light="back"):
     """The linear colour (m, 3) of the stack at every height h."""
     model = light_model(light, h)
-    props = model.props(*_arrays(filaments))
+    props = model.props(*_arrays(filaments), _optics(filaments))
     return model.seen(_depths(np.asarray(starts, float)[None], h), props[None])[0]
 
 
@@ -279,8 +388,8 @@ class Fitter:
         self.light = light_model(light, h)
 
     def props(self, filaments: list[Filament]) -> np.ndarray:
-        """What the light model needs of each filament (attenuation, or colour and td)."""
-        return self.light.props(*_arrays(filaments))
+        """What the light model needs of each filament (attenuation, or a, b and S)."""
+        return self.light.props(*_arrays(filaments), _optics(filaments))
 
     def cost(self, props: np.ndarray, starts: np.ndarray) -> float:
         """Mean distance from the sampled pixels to the path (the same weighted CIELAB
@@ -461,7 +570,9 @@ LIGHT_L = 80  # L* from which a filament counts as light
 def is_base(f: Filament) -> bool:
     """A light, neutral, translucent filament: it can be the base of a lithophane."""
     lab_ = lab(f.linear)
-    return bool(lab_[0] >= LIGHT_L and np.hypot(lab_[1], lab_[2]) <= 12 and f.td >= BASE_TD[0])
+    return bool(
+        lab_[0] >= LIGHT_L and np.hypot(lab_[1], lab_[2]) <= NEUTRAL_CHROMA and f.td >= BASE_TD[0]
+    )
 
 
 def lab_to_linear(lab_: np.ndarray) -> np.ndarray:
@@ -521,7 +632,7 @@ def assign(target_lab: np.ndarray, curve_lab: np.ndarray) -> np.ndarray:
 
 def load_filaments(path: Path | None = None) -> list[Filament]:
     """The catalog (Prusament PETG) or a TOML file with [[filament]] name, hex, td, and
-    optionally abrasive = true."""
+    optionally abrasive = true and the measured k = [red, green, blue] and s (1/mm)."""
     if path is None:
         text = (
             resources.files("lithophane_forge")
@@ -545,12 +656,27 @@ def load_filaments(path: Path | None = None) -> list[Filament]:
             td = float(row["td"])
             if not (math.isfinite(td) and td > 0):
                 raise ValueError(f"td must be a positive number of mm (got {row['td']!r})")
-            out.append(Filament(str(row["name"]), colour, td, abrasive))
+            out.append(Filament(str(row["name"]), colour, td, abrasive, _measured(row)))
         except (KeyError, ValueError, TypeError) as e:
             raise ValueError(f"bad filament entry {row!r}: {e}") from None
     if not out:
         raise ValueError("no filaments in the list")
     return out
+
+
+def _measured(row: dict) -> tuple[tuple[float, float, float], float] | None:
+    """The measured k (three channels) and s of a filament entry, or None."""
+    if "k" not in row and "s" not in row:
+        return None
+    if "k" not in row or "s" not in row:
+        raise ValueError("k and s go together: give both or neither")
+    k, s = row["k"], row["s"]
+    if not isinstance(k, list) or len(k) != 3:
+        raise ValueError(f"k must be three numbers [red, green, blue] in 1/mm (got {k!r})")
+    values = [v for v in (*k, s) if isinstance(v, int | float) and not isinstance(v, bool)]
+    if len(values) != 4 or not all(math.isfinite(v) and v > 0 for v in values):
+        raise ValueError(f"k and s must be positive numbers in 1/mm (got k = {k!r}, s = {s!r})")
+    return (float(k[0]), float(k[1]), float(k[2])), float(s)
 
 
 @cache
@@ -563,26 +689,46 @@ def white() -> Filament:
 CATALOG = "Prusament PETG (Prusa's TD table)"
 
 
-def choices(path: Path | None = None, allow_abrasive: bool = False) -> tuple[list[Filament], str]:
+def choices(
+    path: Path | None = None,
+    allow_abrasive: bool = False,
+    light: str = "back",
+    allow_unmeasured: bool = False,
+) -> tuple[list[Filament], str]:
     """The filaments to pick from (the catalog or your list), and where they come from.
 
     Abrasive filaments need a hardened steel nozzle, and most printers come with brass:
-    they are left out unless allow_abrasive."""
+    they are left out unless allow_abrasive. In room light (light="front"), translucent
+    filaments without measured k and s are left out unless allow_unmeasured:
+    their hex and td cannot predict how they look (see `predictable`)."""
     found = load_filaments(path)
     source = str(path) if path else CATALOG
-    if allow_abrasive:
-        return found, source
-    kept = [f for f in found if not f.abrasive]
+    kept = found if allow_abrasive else [f for f in found if not f.abrasive]
     if not kept:
         raise ValueError(
             "every filament in the list is abrasive; pass --allow-abrasive if your nozzle "
             "is hardened steel"
         )
-    left_out = [f.name for f in found if f.abrasive]
+    left_out = [f.name for f in found if f not in kept]
     if left_out:
         source += (
             f"; left out as abrasive (they need a hardened steel nozzle, --allow-abrasive "
             f"uses them): {', '.join(left_out)}"
+        )
+    if light != "front" or allow_unmeasured:
+        return kept, source
+    unknown = [f.name for f in kept if not predictable(f)]
+    kept = [f for f in kept if predictable(f)]
+    if not kept:
+        raise ValueError(
+            "every filament in the list is translucent and has no measured k and s, "
+            "so nothing can predict how it looks in room light; add k and s to the list "
+            "(see examples/filaments.toml) or pass --allow-unmeasured"
+        )
+    if unknown:
+        source += (
+            "; left out as translucent filaments without measured k and s (hex and TD cannot "
+            f"predict them in room light, --allow-unmeasured uses them): {', '.join(unknown)}"
         )
     return kept, source
 
@@ -612,11 +758,11 @@ class Plan:
 
 
 def _merge(filaments: list[Filament], starts: np.ndarray, by_colour: bool = False):
-    """The same filament twice in a row is one filament (with by_colour, the same hex
-    and td, whatever the name)."""
+    """The same filament twice in a row is one filament (with by_colour, the same hex,
+    td and optics, whatever the name)."""
 
     def key(f):
-        return (f.hex, f.td) if by_colour else f
+        return (f.hex, f.td, f.optics) if by_colour else f
 
     keep = [0] + [i for i in range(1, len(filaments)) if key(filaments[i]) != key(filaments[i - 1])]
     return [filaments[i] for i in keep], np.asarray(starts)[keep]
@@ -656,9 +802,8 @@ def plan(
     The ideal fit moves colours and heights, not the order of the filaments, so it starts
     from k-means colours in a few orders: lightest first for light from behind (the base
     is light), lightest first and darkest first for light from the front. Its heights are
-    free, and they can lose quality when they are snapped to layer tops (in room light the
-    fit also stops early: a run thicker than its coverage depth does not depend on its td).
-    So the same search that picks real filaments also runs on the photo's own colours
+    free, and they can lose quality when they are snapped to layer tops, and Powell can stop
+    in a local minimum. So the same search that picks real filaments also runs on the photo's own colours
     (`photo_colours`), on layer tops, and Powell refines its result. The ideal is the best
     of all these, compared on layer tops."""
     fitter = Fitter(target_lab, h, light=light)

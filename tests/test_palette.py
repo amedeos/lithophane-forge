@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import numpy as np
@@ -254,26 +255,120 @@ def test_filament_td_must_be_a_positive_number(tmp_path, td):
         P.load_filaments(path)
 
 
-# light from the front: a picture you look at in room light
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ("k = [1, 2, 3]\ns = 0.5\n", None),
+        ("k = [1, 2, 3]\n", "go together"),
+        ("s = 0.5\n", "go together"),
+        ("k = [1, 2]\ns = 0.5\n", "three numbers"),
+        ("k = [1, 2, -3]\ns = 0.5\n", "positive"),
+        ("k = [1, 2, 3]\ns = 0\n", "positive"),
+        ('k = [1, 2, 3]\ns = "a"\n', "positive"),
+    ],
+)
+def test_measured_k_and_s(tmp_path, extra, message):
+    path = tmp_path / "f.toml"
+    path.write_text(f'[[filament]]\nname = "x"\nhex = "#808080"\ntd = 1\n{extra}', encoding="utf-8")
+    if message:
+        with pytest.raises(ValueError, match=message):
+            P.load_filaments(path)
+    else:
+        assert P.load_filaments(path)[0].optics == ((1.0, 2.0, 3.0), 0.5)
 
 
-def test_coverage_is_full_at_a_tenth_of_td():
-    td = np.array([3.4])
-    assert P.coverage(np.array([0.0]), td)[0] == 0
-    assert P.coverage(np.array([0.34]), td)[0] == pytest.approx(1)
-    assert P.coverage(np.array([2.0]), td)[0] == 1
-    assert np.all(np.diff(P.coverage(np.linspace(0, 0.4, 20), td)) >= 0)
+# light from the front: a picture you look at in room light (two-flux)
+
+YELLOW, BLUE = "Prusament PETG Yellow Gold", "Prusament PETG Ultramarine Blue Transparent"
+
+
+def catalog(name: str) -> P.Filament:
+    return next(f for f in P.load_filaments() if f.name == name)
+
+
+def front_lab(layers) -> np.ndarray:
+    """CIELAB of one stack in room light: (filament, mm) pairs from the bed up."""
+    starts = np.concatenate([[0.0], np.cumsum([d for _, d in layers])[:-1]])
+    top = np.array([sum(d for _, d in layers)])
+    return P.lab(P.curve([f for f, _ in layers], starts, top, "front"))[0]
+
+
+def test_two_flux_layer_limits():
+    """A layer of no thickness shows what lies under it; a thick layer shows its own colour
+    (for an unmeasured filament, its hex), whatever lies under it."""
+    f = P.white()
+    a, b, s = np.split(P.two_flux(f.linear, [f.td])[0], [3, 6])
+    under = np.array([0.2, 0.5, 0.9])
+    assert np.allclose(P.reflect(a, b, 0 * b, under), under)
+    for below in (under, 0 * under):
+        assert np.allclose(P.reflect(a, b, b * s * 50, below), f.linear, rtol=1e-6)
+
+
+def test_derived_scattering_lets_a_tenth_through_td():
+    fils = P.load_filaments()
+    lin, td = P._arrays(fils)
+    a, b, s = np.split(P.two_flux(lin, td), [3, 6], axis=1)
+    through = P.luminance(P.transmit(a, b, b * s * td[:, None]))
+    assert through == pytest.approx(np.full(len(fils), P.TD_THROUGH), rel=1e-3)
+
+
+def test_measured_optics_win():
+    yellow = catalog(YELLOW)
+    k, s = yellow.optics
+    props = P.two_flux(*P._arrays([yellow]), P._optics([yellow]))[0]
+    assert props[6] == s and np.allclose(props[:3], 1 + np.array(k) / s)
+
+
+def test_white_over_black_builds_up_slowly():
+    """Measured on the owner's print: one layer of Signal White over black is a mid grey,
+    three layers are still about L* 72, and every layer makes it lighter."""
+    black, white = catalog("Prusament PETG Jet Black"), P.white()
+    lstar = [front_lab([(black, 0.6), (white, 0.1 * n)])[0] for n in range(1, 9)]
+    assert np.all(np.diff(lstar) > 0)
+    assert 40 < lstar[0] < 70
+    assert lstar[2] < 90  # the paint model of the first print said 96
+
+
+def test_the_failed_print_is_predicted():
+    """The owner's first print in room light: thin Yellow Gold over white printed as a
+    bright lemon, and thin Ultramarine over that as a dark green to navy. The paint model
+    had planned the yellow as a dark khaki."""
+    black, white = catalog("Prusament PETG Jet Black"), P.white()
+    stack = [(black, 0.6), (white, 0.8)]
+    lemon = front_lab([*stack, (catalog(YELLOW), 0.2)])
+    assert lemon[0] > 75 and lemon[2] > 60
+    dark = front_lab([*stack, (catalog(YELLOW), 0.8), (catalog(BLUE), 0.3)])
+    assert dark[0] < 40
+
+
+def test_front_model_gives_no_numpy_warnings(heights):
+    """Thick layers of very opaque and very clear filaments must not overflow: a warning
+    would reach the terminal."""
+    import warnings
+
+    names = ["Prusament PETG Clear", "Prusament PETG Prusa Galaxy Black", YELLOW]
+    fils = [catalog(n) for n in names]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        light = P.light_model("front", heights)
+        props = light.props(*P._arrays(fils), P._optics(fils))
+        depth = P._depths(np.array([[0.0, 0.6, 1.0]]), np.linspace(0, 50, 30))
+        seen = light.seen(depth, props[None])
+        assert light.hides_from(fils[0]) is None and light.base_td[1] > 0
+    assert np.isfinite(seen).all()
 
 
 def test_front_light_shows_the_top_filament(heights):
-    """Black, then white from 1.0 mm: thin points are black, points well above 1.0 mm are
-    the viewer's white, and in between the white covers the black step by step."""
+    """Black, then white from 1.0 mm: thin points are black, and above 1.0 mm the white
+    hides the black more with every layer, but slowly, because it is translucent."""
     black, white = P.Filament("black", "#292B2B", 0.3), P.white()
     seen = P.lab(P.curve([black, white], np.array([0, 1.0]), heights, "front"))[:, 0]
     black_seen = P.lab(black.linear / P.luminance(white.linear))[0]
-    assert seen[heights <= 1.0 + 1e-9] == pytest.approx(black_seen, abs=0.01)
-    assert seen[-1] == pytest.approx(100, abs=1)
+    assert seen[heights <= 1.0 + 1e-9] == pytest.approx(black_seen, abs=0.1)
+    assert 85 < seen[-1] < 99
     assert np.all(np.diff(seen) >= -1e-9)
+    thick = P.curve([black, white], np.array([0, 1.0]), np.array([30.0]), "front")
+    assert P.lab(thick)[0, 0] == pytest.approx(100, abs=0.5)  # the viewer's white
     # the same stack lit from behind is darkest where it is thickest
     back = P.lab(P.curve([black, white], np.array([0, 1.0]), heights, "back"))[:, 0]
     assert back[-1] < back[0] < 30
@@ -287,7 +382,7 @@ def test_front_plan_fits_a_sunset(heights):
     # fit with free heights stalled in room light and lost quality on layer tops)
     assert plan.ideal.mean_de <= plan.real.mean_de
     base = plan.real.filaments[0]
-    assert base.td <= heights[0] / P.COVER  # it hides what is behind the panel
+    assert P.light_model("front", heights).is_base(base)  # it hides the back
     starts = plan.real.starts
     assert starts[0] == 0 and np.all(np.diff(starts) > 0)
     assert all(np.isclose(heights, z).any() for z in starts[1:])  # on layer tops
@@ -302,9 +397,17 @@ def test_front_ideal_colours_do_not_depend_on_the_list(heights):
 
 
 def test_front_base_must_hide_the_back(heights):
+    """At the thinnest point (0.6 mm) the base must look the same over a black and over a
+    white wall: black does, Signal White needs about 1.8 mm, clear never does."""
     light = P.light_model("front", heights)
     assert light.is_base(P.Filament("black", "#000000", 0.3))
-    assert not light.is_base(P.Filament("clear", "#E4E7E3", 100))
+    assert not light.is_base(P.white())
+    assert 1.4 <= light.hides_from(P.white()) <= 2.2
+    assert light.hides_from(P.Filament("clear", "#E4E7E3", 100)) is None
+    # the ideal base may be as translucent as a white that still hides the back
+    td = light.base_td[1]
+    assert light.is_base(P.Filament("w", P.white().hex, td * 0.99))
+    assert not light.is_base(P.Filament("w", P.white().hex, td * 1.01))
     with pytest.raises(ValueError, match="unknown light"):
         P.light_model("side", heights)
 
@@ -319,18 +422,45 @@ def test_front_batched_cost_is_the_cost(heights):
     assert fitter.costs(props, starts[None], high, below)[0] == pytest.approx(plain, rel=1e-6)
 
 
-def test_front_composite_is_layer_by_layer(heights):
-    """`Frontlight.seen` (unrolled) equals laying the filaments on one by one."""
+def test_front_stack_is_layer_by_layer(heights):
+    """`Frontlight.seen` (all plans and heights at once, written with e^-2x) equals the
+    two-flux formula with coth, applied one layer at a time to one point."""
     rng = np.random.default_rng(1)
     light = P.light_model("front", heights)
-    props = light.props(rng.random((4, 3)), rng.uniform(0.3, 8, 4))
+    props = light.props(rng.uniform(0.02, 0.9, (4, 3)), rng.uniform(0.3, 8, 4))
     starts = np.array([0, 0.9, 1.5, 2.2])
+    ends = [*starts[1:], math.inf]
     got = light.seen(P._depths(starts[None], heights), props[None])[0]
-    srgb, td = props[:, :3], props[:, 3]
-    want = np.zeros((len(heights), 3))
-    for k, d in enumerate(P._depths(starts[None], heights)[0].T):
-        want += (srgb[k] - want) * P.coverage(d, td[k])[:, None]
-    assert np.allclose(got, P.srgb_to_linear(want) / light.white)
+    for z, seen in zip(heights, got):
+        r = [0.0, 0.0, 0.0]
+        for k in range(4):
+            d = min(max(z - starts[k], 0), ends[k] - starts[k])
+            for c in range(3):
+                a, s = props[k, c], props[k, 6]
+                b = math.sqrt(a * a - 1)
+                if d > 0:
+                    coth = 1 / math.tanh(b * s * d)
+                    r[c] = (1 - r[c] * (a - b * coth)) / (a - r[c] + b * coth)
+        assert seen == pytest.approx(np.array(r) / light.white, rel=1e-6, abs=1e-12)
+
+
+def test_unpredictable_filaments_are_left_out_in_room_light(tmp_path):
+    """Hex and TD cannot predict a translucent coloured or nearly clear filament in room
+    light: without measured k and s it is left out, unless allow_unmeasured. Lit from
+    behind it stays."""
+    orange, natural = "Prusament PETG Prusa Orange", "Prusament PETG V0 Natural"
+    kept, source = P.choices(light="front")
+    names = {f.name for f in kept}
+    assert {"Prusament PETG Signal White", "Prusament PETG Jet Black", YELLOW, BLUE} <= names
+    assert orange not in names and "translucent filaments without measured k and s" in source
+    assert natural not in names  # nearly clear: its hex says little about its scattering
+    assert orange in {f.name for f in P.choices(light="front", allow_unmeasured=True)[0]}
+    assert orange in {f.name for f in P.choices(light="back")[0]}
+    own = tmp_path / "own.toml"
+    own.write_text('[[filament]]\nname = "orange"\nhex = "#F07318"\ntd = 6.2\n')
+    with pytest.raises(ValueError, match="allow-unmeasured"):
+        P.choices(own, light="front")
+    assert len(P.choices(own)[0]) == 1
 
 
 @pytest.mark.parametrize("light", ["front", "back"])
