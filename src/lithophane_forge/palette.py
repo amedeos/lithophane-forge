@@ -34,7 +34,7 @@ kind of print.
 import math
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from importlib import resources
 from pathlib import Path
@@ -495,9 +495,15 @@ def kmeans_lab(sample: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
 
 def evaluate(filaments, starts, h, target_lab, light: str = "back") -> Fit:
     colours = curve(filaments, starts, h, light)
-    idx = assign(target_lab, lab(colours))
-    de = delta_e2000(target_lab.reshape(-1, 3), lab(colours)[idx.ravel()])
-    return Fit(filaments, starts, h, colours, float(de.mean()), float(np.percentile(de, 95)))
+    fit = Fit(filaments, starts, h, colours)
+    return score(fit, target_lab, assign(target_lab, lab(colours)))
+
+
+def score(fit: Fit, target_lab: np.ndarray, idx: np.ndarray) -> Fit:
+    """The fit, with the Delta E of the given heights (an index per pixel): for example the
+    heights that print, after they were smoothed."""
+    de = delta_e2000(target_lab.reshape(-1, 3), lab(fit.colours)[idx.ravel()])
+    return replace(fit, mean_de=float(de.mean()), p95_de=float(np.percentile(de, 95)))
 
 
 def assign(target_lab: np.ndarray, curve_lab: np.ndarray) -> np.ndarray:

@@ -19,6 +19,7 @@ SHAPES = ("flat", "curved", "cylinder", "shaped")
 MODES = ("mono", "color")
 VIEWS = ("flat", "relief")
 COLOR_RANGE = (0.6, 3.0)  # mm: colour panels, from the thinnest stack to the frame
+MIN_PATCH = 1.0  # mm²: colour panels, the smallest island or hole a layer keeps
 STANDING = {"flat", "curved", "cylinder"}  # the others print lying on the bed
 DEFAULT_WIDTH = 100.0
 DEFAULT_DIAMETER = 80.0
@@ -43,6 +44,7 @@ class Job:
     allow_abrasive: bool = False  # colour mode: also suggest abrasive filaments
     color_range: tuple[float, float] = COLOR_RANGE
     light: str = "back"  # colour mode: "front" for a picture you look at in room light
+    min_patch: float = MIN_PATCH  # colour mode: see remove_specks (0: off)
     width: float | None = None  # outer size in mm, frame included
     height: float | None = None
     arc: float = 120.0  # degrees, for shape="curved"
@@ -53,7 +55,7 @@ class Job:
     frame_t: float | None = None  # frame thickness; default t_max + 0.8
     pitch: float = 0.2  # mm between grid points
     max_triangles: int = 1_000_000
-    view: str | None = None  # the face that looks at the viewer; None: from the light
+    view: str | None = None  # the face that looks at the viewer; None: from the light (face)
     max_overhang: float = 60.0  # degrees from vertical on the relief side (90: no limit)
     crop: tuple[int, int, int, int] | None = None
     tone: Tone = field(default_factory=Tone)
@@ -64,13 +66,18 @@ class Job:
     led_h: float = 18.0
     slice: bool = False
 
-    def __post_init__(self):
-        if self.view is None:  # in room light you see the top face; a lithophane the bed's
-            object.__setattr__(self, "view", "relief" if self.light == "front" else "flat")
-
     @property
     def stem(self) -> str:
         return self.name or self.photo.stem
+
+    @property
+    def face(self) -> str:
+        """The face that looks at the viewer: `view`, or when it is None the one the light
+        asks for (in room light the top face, for a lithophane the face on the bed). A
+        property, not a value set once, so that replace(job, light=...) follows the light."""
+        if self.view is not None:
+            return self.view
+        return "relief" if self.light == "front" else "flat"
 
     @property
     def front_lit(self) -> bool:
@@ -110,7 +117,7 @@ class Job:
                     "--light front is for colour prints; a white print (--mode mono) is a "
                     "lithophane and needs light from behind"
                 )
-            if self.view != "relief":
+            if self.face != "relief":
                 raise ValueError(
                     "with light from the front you look at the top face (--view relief): "
                     "the flat face lies on the bed and shows only the first filament"
@@ -137,6 +144,8 @@ class Job:
                 )
             if self.tone.invert or self.tone.clahe > 0:
                 raise ValueError("--invert and --clahe work in mono mode only (--mode mono)")
+            if not math.isfinite(self.min_patch) or self.min_patch < 0:
+                raise ValueError("--min-patch must be a number, 0 (off) or more")
         if self.hole and self.shape not in ("flat", "shaped"):
             raise ValueError("--hole works with the flat and shaped panels")
         if self.stand and self.shape != "flat":
@@ -189,6 +198,7 @@ class Result:
     accessories: dict[str, dict] = field(default_factory=dict)
     colour: object = None  # palette.Plan in colour mode
     colour_changes: list[tuple[float, str]] = field(default_factory=list)
+    speck_points: int = 0  # colour mode: grid points of the smallest patch a layer keeps
 
 
 def grid(
@@ -282,10 +292,14 @@ class ColourMap:
     ideal: np.ndarray  # simulated print with the ideal colours (linear RGB)
     real: np.ndarray  # simulated print with the chosen filaments
     photo: np.ndarray
+    speck_points: int = 0  # remove_specks: islands and holes below this many points go
+    notes: list[str] = field(default_factory=list)
 
 
 def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     """Colour mode: the filaments, the change heights and the height of every grid point."""
+    from dataclasses import replace
+
     from scipy.ndimage import median_filter
 
     from . import palette
@@ -295,22 +309,97 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     ci, ri = int(in_u.sum()), int(in_v.sum())
     photo = image.frame(rgb, (u1 - u0) / (v1 - v0), job.crop)
     target = palette.target(image.resize(photo, ri, ci), job.tone.levels, job.tone.gamma)
+    box = np.ix_(in_v, in_u)
+    seen = visible_points(job, lay)
+    points = round(job.min_patch / lay.pitch**2)
+    if points >= seen.sum():
+        raise ValueError(
+            f"--min-patch {job.min_patch:g} mm² is as large as the whole picture "
+            f"({seen.sum() * lay.pitch**2:.0f} mm²): use a smaller value"
+        )
     lo, hi = job.color_range
     h = palette.heights(lo, hi, job.setup.first_layer, job.setup.layer)
     choices, source = palette.choices(job.filaments, job.allow_abrasive)
     plan = palette.plan(target, job.colors, h, choices, source, job.light)
-    real_idx = median_filter(palette.assign(target, palette.lab(plan.real.colours)), size=3)
-    ideal_idx = palette.assign(target, palette.lab(plan.ideal.colours))
-    r0, c0 = int(np.argmax(in_v)), int(np.argmax(in_u))
+    frame = int(np.clip(np.searchsorted(h, job.frame_thickness + 1e-9) - 1, 0, len(h) - 1))
+
+    def smoothed(fit):
+        """The heights that print (a median filter, then no specks, with the frame around
+        the picture), and the fit with the Delta E of those heights where the picture shows."""
+        full = np.full((lay.rows, lay.cols), frame)
+        full[box] = median_filter(palette.assign(target, palette.lab(fit.colours)), size=3)
+        idx = remove_specks(full, points, ~seen, frame)[box]
+        inside = seen[box]
+        return idx, palette.score(fit, target[inside], idx[inside])
+
+    real_idx, real = smoothed(plan.real)
+    ideal_idx, ideal = smoothed(plan.ideal)
+    plan = replace(plan, ideal=ideal, real=real)
     t = np.full((lay.rows, lay.cols), job.frame_thickness)
-    t[r0 : r0 + ri, c0 : c0 + ci] = h[real_idx]
+    t[box] = h[real_idx]
 
     def sim(fit, idx):
         out = np.broadcast_to(fit.colours[-1], (lay.rows, lay.cols, 3)).copy()
-        out[r0 : r0 + ri, c0 : c0 + ci] = fit.colours[idx]
+        out[box] = fit.colours[idx]
         return out
 
-    return ColourMap(plan, t, sim(plan.ideal, ideal_idx), sim(plan.real, real_idx), photo)
+    notes = []
+    top = np.searchsorted(real.starts, h[real_idx[seen[box]]] - 1e-6, side="right") - 1
+    if len(real.filaments) > 1 and not (top == len(real.filaments) - 1).any():
+        where = "only on the frame" if job.frame > 0 else "nowhere"
+        why = " (--min-patch 0 keeps the specks)" if points > 1 else ""
+        notes.append(
+            f"once the heights are smoothed, no point of the picture reaches the last "
+            f"filament, {real.filaments[-1].name}: it shows {where}{why}"
+        )
+    cmap = ColourMap(plan, t, sim(ideal, ideal_idx), sim(real, real_idx), photo, points, notes)
+    return cmap
+
+
+def visible_points(job: Job, lay: Layout) -> np.ndarray:
+    """The grid points where the viewer sees the picture, not the frame (row 0 at the top)."""
+    in_v, in_u, _ = picture_cells(job, lay)
+    seen = np.zeros((lay.rows, lay.cols), dtype=bool)
+    seen[np.ix_(in_v, in_u)] = True
+    if lay.outline is not None:
+        seen &= inner_points(job, lay)
+    return seen
+
+
+def inner_points(job: Job, lay: Layout) -> np.ndarray:
+    """Shaped panels: the grid points inside the frame (row 0 at the top)."""
+    from . import shapes
+
+    dims = (lay.width, lay.height, lay.rows, lay.cols)
+    return np.flipud(shapes.points_inside(lay.outline.buffer(-job.frame), *dims))
+
+
+def remove_specks(
+    idx: np.ndarray, cells: int, hidden: np.ndarray | None = None, frame: int = 0
+) -> np.ndarray:
+    """Colour mode: no layer of the print keeps an island or a hole smaller than `cells`
+    grid points. `idx` holds a height (index) per point; a layer is the set of points at
+    least that high. An island smaller than about two nozzle widths prints as a blob, and
+    in the picture it is a speck of the wrong colour.
+
+    The `hidden` points lie under the frame, at height `frame`: a patch that joins the
+    frame is no island, and a hole that runs under the frame counts only its visible part.
+    They come back at height `frame`.
+
+    An area opening lowers every small island to the height around it, then an area closing
+    raises every small hole. The closing only fills holes, so it joins the filled points to
+    the large patch around them and makes no new island: one pass is enough. A thin line
+    that joins a large patch stays, and so does a thin ring around one."""
+    if hidden is not None:
+        idx = np.where(hidden, frame, idx)
+    if cells <= 1:
+        return idx
+    if cells > idx.size:  # scikit-image would return -1 everywhere
+        raise ValueError(f"no patch of {cells} points fits in {idx.size} points")
+    from skimage.morphology import area_closing, area_opening
+
+    out = area_opening(idx, cells, connectivity=1)
+    return area_closing(out, cells, connectivity=1)
 
 
 def limit_overhangs(t_view: np.ndarray, angle: float, dz: float) -> np.ndarray:
@@ -359,10 +448,10 @@ def volumes(job: Job, lay: Layout, t_view: np.ndarray) -> list[tuple[str, mesh.M
         if job.hole:
             outline = lay.outline if lay.outline is not None else box(-w / 2, 0, w / 2, h)
             parts.append(("hanging tab", accessories.tab(outline, ft)))
-        if job.view == "flat":  # seen from the bed side
+        if job.face == "flat":  # seen from the bed side
             parts = [(n, _mirror_x(m)) for n, m in parts]
         return parts
-    if job.view == "relief":
+    if job.face == "relief":
         t = np.fliplr(t)  # seen from the relief side, left and right swap
     if job.shape == "flat":
         parts = [("lithophane", mesh.standing(t, w, h))]
@@ -465,7 +554,8 @@ def make(job: Job) -> Result:
         t_view, photo = cmap.t_view, cmap.photo
         res.colour = cmap.plan
         res.colour_changes = cmap.plan.real.colour_changes(job.setup.layer)
-        res.notes += colour_notes(job, cmap.plan)
+        res.speck_points = cmap.speck_points
+        res.notes += colour_notes(job, cmap.plan) + cmap.notes
     else:
         t_view, photo = thickness_map(job, rgb, lay)
     if job.standing:
@@ -492,7 +582,7 @@ def make(job: Job) -> Result:
 
         dims = (lay.width, lay.height, lay.rows, lay.cols)
         mask = np.flipud(shapes.points_inside(lay.outline, *dims))
-        inner = np.flipud(shapes.points_inside(lay.outline.buffer(-job.frame), *dims))
+        inner = inner_points(job, lay)
         t_seen = np.where(inner, t_view, job.frame_thickness)
     if cmap is None:
         lit = render.backlit(t_seen, job.optics, mask=mask)
@@ -666,7 +756,7 @@ def clear_outputs(folder: Path, stem: str, keep: Path | None = None) -> None:
 
 def relief_panel(job: Job, t_view: np.ndarray, pitch: float, mask=None):
     """The relief in raking light, as you see it: from behind when the flat face is the front."""
-    if job.view == "flat":
+    if job.face == "flat":
         flip = None if mask is None else np.fliplr(mask)
         return "relief side (from behind)", render.relief(np.fliplr(t_view), pitch, flip)
     return "relief side (front)", render.relief(t_view, pitch, mask)
@@ -755,12 +845,14 @@ def write_plan(job: Job, res: Result) -> None:
         "mask": job.mask if job.shape == "shaped" else None,
         "frame_mm": job.frame,
         "frame_thickness_mm": job.frame_thickness,
-        "view": job.view,
+        "view": job.face,
         "max_overhang_deg": job.max_overhang if job.standing else None,
         "grid": [lay.rows, lay.cols],
         "pitch_mm": round(lay.pitch, 4),
         "optics": asdict(job.optics) if job.mode == "mono" else None,
         "color_range_mm": list(job.color_range) if job.mode == "color" else None,
+        "min_patch_mm2": job.min_patch if job.mode == "color" else None,
+        "min_patch_points": res.speck_points if job.mode == "color" else None,
         "light": job.light,
         "tone": asdict(job.tone),
         "printer": {
@@ -803,6 +895,7 @@ def colour_report(job: Job, res: Result) -> list[str]:
             f"the photo (95 % of it within {p.real.p95_de:.0f}); the ideal colours, fitted to "
             f"the photo alone, give {p.ideal.mean_de:.1f}."
         ),
+        speck_line(job, res),
         "",
         "## Ideal colours",
         "",
@@ -831,6 +924,21 @@ def colour_report(job: Job, res: Result) -> list[str]:
         "",
     ]
     return lines
+
+
+def speck_line(job: Job, res: Result) -> str:
+    if res.speck_points > 1:
+        return (
+            f"- Islands and holes smaller than {job.min_patch:g} mm² in a layer are merged "
+            "into the area around them: they would print as blobs (--min-patch, 0 keeps them)."
+        )
+    if job.min_patch > 0:
+        return (
+            f"- --min-patch {job.min_patch:g} mm² is not larger than one grid point "
+            f"({res.layout.pitch:.2f} mm apart), so small islands and holes are kept: some "
+            "may print as blobs."
+        )
+    return "- Small islands and holes are kept (--min-patch 0): some may print as blobs."
 
 
 def report(job: Job, res: Result) -> str:
@@ -876,7 +984,7 @@ def report(job: Job, res: Result) -> str:
                 "- It prints lying on the bed, flat face down. You look at the top face, the "
                 "last one printed: PrusaSlicer shows it as you will see it, not mirrored."
             )
-        elif job.view == "flat":
+        elif job.face == "flat":
             lines.append(
                 "- It prints lying on the bed, flat face down: that face is the one you "
                 "look at, so a smooth or satin sheet gives the cleanest result."
@@ -920,7 +1028,7 @@ def report(job: Job, res: Result) -> str:
     else:
         look = [
             (
-                f"- The {'flat' if job.view == 'flat' else 'relief'} face looks at you; put "
+                f"- The {'flat' if job.face == 'flat' else 'relief'} face looks at you; put "
                 "the light behind the other face. A diffuse, neutral white LED (about 4000 K) "
                 "works best."
             ),
