@@ -59,22 +59,20 @@ def test_heights_are_layer_tops(heights):
 
 
 def test_grey_filament_lets_ten_percent_through_at_td():
-    grey = P.hex_to_linear("#808080")
-    att = P.attenuation(grey[None], np.array([2.0]))
-    t = P.stack(att, np.array([0.0]), np.array([2.0]))[0]
-    assert t == pytest.approx([0.1] * 3, rel=1e-6)
+    grey = P.Filament("grey", "#808080", 2.0)
+    seen = P.curve([grey], np.array([0.0]), np.array([2.0]), "back")[0]
+    assert seen * P._exposure(2.0) == pytest.approx([0.1] * 3, rel=1e-6)  # of the LED
 
 
 def test_a_coloured_filament_passes_its_own_colour():
-    red = P.hex_to_linear("#C62127")
-    t = P.stack(P.attenuation(red[None], np.array([2.0])), np.array([0.0]), np.array([1.0]))[0]
+    red = P.Filament("red", "#C62127", 2.0)
+    t = P.curve([red], np.array([0.0]), np.array([1.0]), "back")[0]
     assert t[0] > t[1] and t[0] > t[2]
 
 
 def test_stack_gets_darker_with_height(heights):
     fils = P.load_filaments()[:4]
-    att = P.attenuation(np.array([f.linear for f in fils]), np.array([f.td for f in fils]))
-    curve = P.stack(att, np.array([0, 1.0, 1.6, 2.2]), heights)
+    curve = P.curve(fils, np.array([0, 1.0, 1.6, 2.2]), heights, "back")
     assert np.all(np.diff(P.luminance(curve)) <= 1e-12)
 
 
@@ -188,7 +186,7 @@ def test_batched_cost_is_the_cost(heights):
     fitter = P.Fitter(P.target(lake()), heights)
     fil = P.load_filaments()[:4]
     starts = np.array([0, 0.9, 1.5, 2.2])
-    att = P._attenuation(fil)
+    att = fitter.props(fil)
     plain = fitter.cost(att, starts)
     low, high = heights[heights <= 0.9 + 1e-9], heights[heights > 0.9 + 1e-9]
     below = fitter._nearest_d2(att[None], starts[None], low)[0]
@@ -254,3 +252,103 @@ def test_filament_td_must_be_a_positive_number(tmp_path, td):
     path.write_text(f'[[filament]]\nname = "x"\nhex = "#808080"\ntd = {td}\n', encoding="utf-8")
     with pytest.raises(ValueError, match="td must be"):
         P.load_filaments(path)
+
+
+# light from the front: a picture you look at in room light
+
+
+def test_coverage_is_full_at_a_tenth_of_td():
+    td = np.array([3.4])
+    assert P.coverage(np.array([0.0]), td)[0] == 0
+    assert P.coverage(np.array([0.34]), td)[0] == pytest.approx(1)
+    assert P.coverage(np.array([2.0]), td)[0] == 1
+    assert np.all(np.diff(P.coverage(np.linspace(0, 0.4, 20), td)) >= 0)
+
+
+def test_front_light_shows_the_top_filament(heights):
+    """Black, then white from 1.0 mm: thin points are black, points well above 1.0 mm are
+    the viewer's white, and in between the white covers the black step by step."""
+    black, white = P.Filament("black", "#292B2B", 0.3), P.white()
+    seen = P.lab(P.curve([black, white], np.array([0, 1.0]), heights, "front"))[:, 0]
+    black_seen = P.lab(black.linear / P.luminance(white.linear))[0]
+    assert seen[heights <= 1.0 + 1e-9] == pytest.approx(black_seen, abs=0.01)
+    assert seen[-1] == pytest.approx(100, abs=1)
+    assert np.all(np.diff(seen) >= -1e-9)
+    # the same stack lit from behind is darkest where it is thickest
+    back = P.lab(P.curve([black, white], np.array([0, 1.0]), heights, "back"))[:, 0]
+    assert back[-1] < back[0] < 30
+
+
+def test_front_plan_fits_a_sunset(heights):
+    t = P.target(sunset())
+    plan = P.plan(t, 4, heights, P.load_filaments(), "catalog", "front")
+    assert plan.real.mean_de < 10
+    # the ideal colours may be any colour, so they are at least as close as the print (a
+    # fit with free heights stalled in room light and lost quality on layer tops)
+    assert plan.ideal.mean_de <= plan.real.mean_de
+    base = plan.real.filaments[0]
+    assert base.td <= heights[0] / P.COVER  # it hides what is behind the panel
+    starts = plan.real.starts
+    assert starts[0] == 0 and np.all(np.diff(starts) > 0)
+    assert all(np.isclose(heights, z).any() for z in starts[1:])  # on layer tops
+
+
+def test_front_ideal_colours_do_not_depend_on_the_list(heights):
+    t = P.target(lake())
+    a = P.plan(t, 3, heights, P.load_filaments(), "catalog", "front")
+    b = P.plan(t, 3, heights, P.load_filaments(EXAMPLE), "shelf", "front")
+    assert [(f.hex, f.td) for f in a.ideal.filaments] == [(f.hex, f.td) for f in b.ideal.filaments]
+    assert np.array_equal(a.ideal.starts, b.ideal.starts)
+
+
+def test_front_base_must_hide_the_back(heights):
+    light = P.light_model("front", heights)
+    assert light.is_base(P.Filament("black", "#000000", 0.3))
+    assert not light.is_base(P.Filament("clear", "#E4E7E3", 100))
+    with pytest.raises(ValueError, match="unknown light"):
+        P.light_model("side", heights)
+
+
+def test_front_batched_cost_is_the_cost(heights):
+    fitter = P.Fitter(P.target(lake()), heights, light="front")
+    props = fitter.props(P.load_filaments()[:4])
+    starts = np.array([0, 0.9, 1.5, 2.2])
+    plain = fitter.cost(props, starts)
+    low, high = heights[heights <= 0.9 + 1e-9], heights[heights > 0.9 + 1e-9]
+    below = fitter._nearest_d2(props[None], starts[None], low)[0]
+    assert fitter.costs(props, starts[None], high, below)[0] == pytest.approx(plain, rel=1e-6)
+
+
+def test_front_composite_is_layer_by_layer(heights):
+    """`Frontlight.seen` (unrolled) equals laying the filaments on one by one."""
+    rng = np.random.default_rng(1)
+    light = P.light_model("front", heights)
+    props = light.props(rng.random((4, 3)), rng.uniform(0.3, 8, 4))
+    starts = np.array([0, 0.9, 1.5, 2.2])
+    got = light.seen(P._depths(starts[None], heights), props[None])[0]
+    srgb, td = props[:, :3], props[:, 3]
+    want = np.zeros((len(heights), 3))
+    for k, d in enumerate(P._depths(starts[None], heights)[0].T):
+        want += (srgb[k] - want) * P.coverage(d, td[k])[:, None]
+    assert np.allclose(got, P.srgb_to_linear(want) / light.white)
+
+
+@pytest.mark.parametrize("light", ["front", "back"])
+def test_few_photo_colours_give_no_warnings(heights, light):
+    """A photo with fewer colours than k-means asks for made scipy warn on the terminal."""
+    import warnings
+
+    img = np.zeros((40, 60, 3)) + [0.8, 0.7, 0.6]
+    img[20:] = [0.1, 0.2, 0.4]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        plan = P.plan(P.target(img), 6, heights, *P.choices(), light=light)
+    assert len(plan.ideal.filaments) >= 1
+
+
+def test_ideal_colours_come_from_the_photo(heights):
+    """The candidates of the ideal search: the photo's colours and greys, nothing else."""
+    t = P.target(sunset())
+    found = P.photo_colours(P.Fitter(t, heights).sample)
+    assert len(found) == (P.PHOTO_COLOURS + len(P.GREYS)) * len(P.TD_STEPS)
+    assert all(P.TD_RANGE[0] <= f.td <= P.TD_RANGE[1] for f in found)

@@ -157,8 +157,12 @@ class Analysis:
         return self.p99_lstar - self.p1_lstar
 
 
-def analyse(rgb: np.ndarray, grid: tuple[int, int] | None = None) -> Analysis:
-    """Statistics and advice. `grid` (rows, cols) is the print grid, to check resolution."""
+def analyse(rgb: np.ndarray, grid: tuple[int, int] | None = None, colour=False) -> Analysis:
+    """Statistics and advice. `grid` (rows, cols) is the print grid, to check resolution.
+
+    The advice is for a white lithophane (--mode mono), or with `colour` for a colour
+    print: there the height of a black or white part depends on the colour plan, colours
+    count, and --clahe does not exist."""
     lstar = y_to_lstar(luminance(rgb))
     p1, p99 = np.percentile(lstar, [1, 99])
     r, g, b = (rgb[..., k] * 255 for k in range(3))
@@ -175,24 +179,24 @@ def analyse(rgb: np.ndarray, grid: tuple[int, int] | None = None) -> Analysis:
     )
     if a.dynamic_range < 50:
         a.notes.append(
-            f"low contrast (L* {p1:.0f}..{p99:.0f}): levels will stretch it; "
-            "try --clahe 0.01 for more local contrast"
+            f"low contrast (L* {p1:.0f}..{p99:.0f}): levels will stretch it"
+            + ("" if colour else "; try --clahe 0.01 for more local contrast")
         )
     if a.shadows > 0.25:
         a.notes.append(
-            f"{a.shadows:.0%} of the photo is near black: those parts print at full "
-            "thickness (more time and plastic) and show no detail"
+            f"{a.shadows:.0%} of the photo is near black: those parts show no detail"
+            + ("" if colour else " and print at full thickness (more time and plastic)")
         )
     if a.highlights > 0.25:
         a.notes.append(
-            f"{a.highlights:.0%} of the photo is near white: those parts print at "
-            "minimum thickness and show no detail"
+            f"{a.highlights:.0%} of the photo is near white: those parts show no detail"
+            + ("" if colour else " and print at minimum thickness")
         )
     if a.mean_lstar < 35:
         a.notes.append("dark photo: try --gamma 0.8 to open the shadows")
     elif a.mean_lstar > 75:
         a.notes.append("bright photo: try --gamma 1.3 to bring back the light tones")
-    if a.colourfulness > 40:
+    if a.colourfulness > 40 and not colour:
         a.notes.append(
             f"very colourful photo ({a.colourfulness:.0f}): a lithophane shows only "
             "lightness, so colours of the same lightness will merge"

@@ -160,7 +160,8 @@ def test_shapes_and_accessories_slice(kw, tmp_path):
         assert f"; filament_colour = {want}" in cfg, name
 
 
-def test_colour_changes_reach_the_gcode(tmp_path):
+@pytest.mark.parametrize("light, view", [("back", "flat"), ("front", "relief")])
+def test_colour_changes_reach_the_gcode(tmp_path, light, view):
     """The M600s in the sliced G-code are exactly the planned ones."""
     import json
 
@@ -180,6 +181,8 @@ def test_colour_changes_reach_the_gcode(tmp_path):
         colors=3,
         width=50,
         pitch=0.5,
+        light=light,
+        view=view,
     )
     res = forge.make(j)
     plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))

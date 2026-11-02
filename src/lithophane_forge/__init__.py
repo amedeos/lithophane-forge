@@ -11,6 +11,7 @@ examples:
   lithophane-forge analyze photo.jpg --colors 4
   lithophane-forge make photo.jpg --width 120 --slice
   lithophane-forge make photo.jpg --colors 5 --width 150
+  lithophane-forge make photo.jpg --light back --width 120
   lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
   lithophane-forge make photo.jpg --mode mono --width 120
   lithophane-forge make photo.jpg --shape curved --height 100 --arc 110
@@ -19,8 +20,10 @@ examples:
   lithophane-forge calibrate --slice
   lithophane-forge printers
 
-make prints in colour, lying on the bed, with filament changes (M600); --mode mono
-prints white filament standing. Curved panels and cylinders always print mono.
+make prints in colour, lying on the bed, with filament changes (M600): a picture you
+look at in room light, from the top. --light back makes a colour lithophane (light
+behind it); --mode mono prints white filament standing. Curved panels and cylinders
+always print mono.
 """
 
 
@@ -58,21 +61,48 @@ def _levels(text: str) -> tuple[float, float]:
     return lo, hi
 
 
+LIGHT_HELP = (
+    "colour mode: front (the default) for a picture you look at in room light, from the "
+    "top; back for a lithophane, lit from behind"
+)
+
+
+class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    """Shows the defaults, but not "(default: None)": those options say in their help
+    what happens when you leave them out."""
+
+    def _get_help_string(self, action):
+        if action.default is None:
+            return action.help
+        return super()._get_help_string(action)
+
+
 def parser() -> argparse.ArgumentParser:
-    from .forge import MODES, SHAPES, VIEWS
+    from .forge import LIGHTS, MODES, SHAPES, VIEWS
     from .printers import DEFAULT_MATERIAL, DEFAULT_PRINTER, MATERIALS, PRINTERS
 
     p = argparse.ArgumentParser(
         prog="lithophane-forge",
         epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Turn a photo into a lithophane and a ready-to-print PrusaSlicer project.",
+        description="Turn a photo into a colour picture or a lithophane and a ready-to-print "
+        "PrusaSlicer project.",
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    a = sub.add_parser("analyze", help="check a photo and get advice before printing")
+    a = sub.add_parser(
+        "analyze",
+        help="check a photo and get advice before printing",
+        formatter_class=HelpFormatter,
+    )
     a.add_argument("photo", type=Path)
+    a.add_argument(
+        "--mode",
+        choices=MODES,
+        default="color",
+        help="advice for a colour print, or for a white lithophane (mono)",
+    )
     a.add_argument(
         "--colors",
         type=_number(int, 2),
@@ -80,11 +110,12 @@ def parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--filaments", type=Path, help="your filaments (TOML) instead of the catalog")
     a.add_argument("--allow-abrasive", action="store_true", help=ABRASIVE_HELP)
+    a.add_argument("--light", choices=LIGHTS, help=LIGHT_HELP + " (with --colors)")
 
     m = sub.add_parser(
         "make",
-        help="make the lithophane files from a photo",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="make the print files (colour picture or lithophane) from a photo",
+        formatter_class=HelpFormatter,
     )
     m.add_argument("photo", type=Path)
     size = m.add_argument_group("size and shape")
@@ -134,8 +165,8 @@ def parser() -> argparse.ArgumentParser:
     size.add_argument(
         "--view",
         choices=VIEWS,
-        default="flat",
-        help="the face that looks at the viewer (the light goes behind the other)",
+        help="the face that looks at the viewer (default: relief with --light front, else "
+        "flat; with light from behind, the light goes behind the other face)",
     )
     size.add_argument(
         "--max-overhang",
@@ -161,8 +192,12 @@ def parser() -> argparse.ArgumentParser:
         "--clahe", type=_number(float, 0), default=0.0, help="local contrast (0: off, 0.01: mild)"
     )
     look.add_argument("--invert", action="store_true", help="print a negative")
-    look.add_argument("--t-min", type=_number(float, 0.3), help="thinnest (brightest) mm")
-    look.add_argument("--t-max", type=_number(float, 0.5), help="thickest (darkest) mm")
+    look.add_argument(
+        "--t-min", type=_number(float, 0.3), help="thinnest point in mm (mono: the brightest)"
+    )
+    look.add_argument(
+        "--t-max", type=_number(float, 0.5), help="thickest point in mm (mono: the darkest)"
+    )
     look.add_argument(
         "--td",
         type=_number(float, 0.1),
@@ -201,6 +236,7 @@ def parser() -> argparse.ArgumentParser:
         "Prusament PETG catalog",
     )
     col.add_argument("--allow-abrasive", action="store_true", help=ABRASIVE_HELP)
+    col.add_argument("--light", choices=LIGHTS, help=LIGHT_HELP)
     prn = m.add_argument_group("printer")
     prn.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
     prn.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
@@ -242,6 +278,7 @@ def job_from(args: argparse.Namespace):
         )
         mode = args.mode or ("color" if args.shape in ("flat", "shaped") else "mono")
         mono = mode == "mono"
+        light = args.light or ("back" if mono else "front")
         if not mono and args.td is not None:
             raise ValueError(
                 "--td is for white prints (--mode mono); in colour the filaments' own TD "
@@ -272,6 +309,7 @@ def job_from(args: argparse.Namespace):
         filaments=args.filaments,
         allow_abrasive=args.allow_abrasive,
         color_range=color_range,
+        light=light,
         width=args.width,
         height=args.height,
         arc=args.arc,
@@ -305,8 +343,10 @@ def cmd_make(args) -> int:
         raise UsageError(str(e)) from None
     sx, sy, sz = res.size
     lay = res.layout
+    light = {"front": " (light from the front)", "back": " (light from behind)"}
     print(
-        f"{job.stem}: {job.shape}, {job.mode}, printed {'standing' if job.standing else 'lying'}"
+        f"{job.stem}: {job.shape}, {job.mode}{light[job.light] if job.mode == 'color' else ''}"
+        f", printed {'standing' if job.standing else 'lying'}"
         f", {sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, "
         f"grid {lay.cols} x {lay.rows} at {lay.pitch:.2f} mm, "
         f"{res.triangles:,} triangles, {res.volume_cm3:.1f} cm3"
@@ -316,7 +356,7 @@ def cmd_make(args) -> int:
     if res.colour is not None:
         print_colour(res.colour, res.colour_changes)
     for name, info in res.sliced.items():
-        print(f"PrusaSlicer, {name}: {info['time']}, {info['filament_g']} g")
+        print(f"PrusaSlicer, {job.part_name(name)}: {info['time']}, {info['filament_g']} g")
     for note in res.notes:
         print(f"note: {note}")
     for kind, path in res.files.items():
@@ -340,6 +380,11 @@ def print_colour(plan, changes) -> None:
 def cmd_analyze(args) -> int:
     from . import image
 
+    colour = args.mode == "color"
+    if not colour and (args.colors or args.light):
+        raise UsageError("--colors and --light are for colour prints, not --mode mono")
+    if args.light and not args.colors:
+        raise UsageError("--light sets the light of the colour plan: add --colors N")
     if not args.photo.is_file():
         raise UsageError(f"no such photo: {args.photo}")
     if args.filaments and not args.filaments.is_file():
@@ -348,7 +393,7 @@ def cmd_analyze(args) -> int:
         rgb = image.load(args.photo)
     except ValueError as e:
         raise UsageError(str(e)) from None
-    a = image.analyse(rgb)
+    a = image.analyse(rgb, colour=colour)
     print(f"{args.photo.name}: {a.size[0]} x {a.size[1]} px")
     print(
         f"lightness L*: mean {a.mean_lstar:.0f}, 1%..99% {a.p1_lstar:.0f}..{a.p99_lstar:.0f}"
@@ -358,10 +403,7 @@ def cmd_analyze(args) -> int:
         f"near black {a.shadows:.0%}, near white {a.highlights:.0%}, "
         f"colourfulness {a.colourfulness:.0f}"
     )
-    # with --colors the colour plan says how well the colours fit; the mono warning about
-    # colourful photos does not apply
-    notes = [n for n in a.notes if not (args.colors and "colourful" in n)]
-    for note in notes or ["looks fine for a lithophane"]:
+    for note in a.notes or ["looks fine to print"]:
         print(f"- {note}")
     if args.colors:
         from . import palette, printers
@@ -376,9 +418,13 @@ def cmd_analyze(args) -> int:
             choices, source = palette.choices(args.filaments, args.allow_abrasive)
         except ValueError as e:
             raise UsageError(str(e)) from None
-        plan = palette.plan(palette.target(small), args.colors, h, choices, source)
+        light = args.light or "front"
+        plan = palette.plan(palette.target(small), args.colors, h, choices, source, light)
         n = len(plan.real.filaments)
-        print(f"colour print with {n} of {args.colors} filaments ({s.printer.title} layers):")
+        lit = "light from the front" if light == "front" else "light from behind"
+        print(
+            f"colour print with {n} of {args.colors} filaments, {lit} ({s.printer.title} layers):"
+        )
         print_colour(plan, plan.real.colour_changes(s.layer))
     return 0
 

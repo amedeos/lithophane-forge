@@ -71,9 +71,51 @@ def test_colour_is_the_default(photo, argv, mode):
     assert job_from(parser().parse_args(["make", str(photo), *argv])).mode == mode
 
 
+@pytest.mark.parametrize(
+    "argv, light, view",
+    [
+        ([], "front", "relief"),
+        (["--light", "back"], "back", "flat"),
+        (["--light", "back", "--view", "relief"], "back", "relief"),
+        (["--mode", "mono"], "back", "flat"),
+        (["--shape", "curved"], "back", "flat"),
+    ],
+)
+def test_front_light_is_the_colour_default(photo, argv, light, view):
+    """A colour print is a picture you look at in room light, from the top, unless
+    --light back asks for a lithophane."""
+    from lithophane_forge import job_from, parser
+
+    job = job_from(parser().parse_args(["make", str(photo), *argv]))
+    assert (job.light, job.view) == (light, view)
+    job.check()
+
+
 def test_analyze(photo, capsys):
     assert main(["analyze", str(photo)]) == 0
     assert "lightness" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (["--light", "back"], "add --colors"),
+        (["--mode", "mono", "--colors", "3"], "not --mode mono"),
+        (["--mode", "mono", "--light", "front"], "not --mode mono"),
+    ],
+)
+def test_analyze_options_that_do_nothing_are_errors(photo, capsys, argv, message):
+    assert main(["analyze", str(photo), *argv]) == 2
+    assert message in capsys.readouterr().err
+
+
+def test_help_shows_no_none_defaults(capsys):
+    for command in ("make", "analyze"):
+        with pytest.raises(SystemExit):
+            main([command, "--help"])
+        out = capsys.readouterr().out
+        assert "(default: None)" not in out and "(default: flat)" not in out
+        assert "front (the default)" in out
 
 
 @pytest.mark.parametrize(
@@ -90,6 +132,8 @@ def test_analyze(photo, capsys):
         (["make", "{photo}", "--height", "500", "--pitch", "1"], "does not fit"),
         (["make", "{photo}", "--clahe", "0.01"], "--mode mono"),
         (["make", "{photo}", "--td", "2"], "--td is for white prints"),
+        (["make", "{photo}", "--mode", "mono", "--light", "front"], "for colour prints"),
+        (["make", "{photo}", "--view", "flat"], "--view relief"),
     ],
 )
 def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):

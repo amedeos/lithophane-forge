@@ -78,3 +78,14 @@ def test_analysis_notes():
     a = image.analyse(dark, (200, 200))
     text = " ".join(a.notes)
     assert "near black" in text and "fewer pixels" in text
+
+
+def test_colour_advice_does_not_talk_about_thickness():
+    """In a colour print the height of a black part depends on the plan, and --clahe and
+    the warning about colourful photos are for mono prints."""
+    flat = np.full((100, 100, 3), 0.01)
+    flat[:10] = [0.9, 0.1, 0.1]
+    mono = " ".join(image.analyse(flat).notes)
+    colour = " ".join(image.analyse(flat, colour=True).notes)
+    assert "full thickness" in mono and "near black" in colour
+    assert "thickness" not in colour and "--clahe" not in colour and "colourful" not in colour
