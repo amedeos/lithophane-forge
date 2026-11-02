@@ -87,7 +87,7 @@ def test_front_light_is_the_colour_default(photo, argv, light, view):
     from lithophane_forge import job_from, parser
 
     job = job_from(parser().parse_args(["make", str(photo), *argv]))
-    assert (job.light, job.view) == (light, view)
+    assert (job.light, job.face) == (light, view)
     job.check()
 
 
@@ -134,6 +134,8 @@ def test_help_shows_no_none_defaults(capsys):
         (["make", "{photo}", "--td", "2"], "--td is for white prints"),
         (["make", "{photo}", "--mode", "mono", "--light", "front"], "for colour prints"),
         (["make", "{photo}", "--view", "flat"], "--view relief"),
+        (["make", "{photo}", "--mode", "mono", "--min-patch", "2"], "not --mode mono"),
+        (["make", "{photo}", "--shape", "cylinder", "--min-patch", "2"], "cylinder (always mono)"),
     ],
 )
 def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
@@ -144,12 +146,31 @@ def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
 
 @pytest.mark.parametrize(
     "argv",
-    [["--printer", "nope"], ["--shape", "curved", "--arc", "400"]],
+    [
+        ["--printer", "nope"],
+        ["--shape", "curved", "--arc", "400"],
+        ["--min-patch", "inf"],
+        ["--min-patch", "nan"],
+        ["--width", "inf"],
+    ],
 )
 def test_bad_option_exits_with_2(argv):
     with pytest.raises(SystemExit) as e:
         main(["make", "x.jpg", *argv])
     assert e.value.code == 2
+
+
+def test_min_patch_reaches_the_job(photo, capsys):
+    from lithophane_forge import forge, job_from, parser
+
+    p = parser()
+    assert job_from(p.parse_args(["make", str(photo)])).min_patch == forge.MIN_PATCH
+    assert job_from(p.parse_args(["make", str(photo), "--min-patch", "0"])).min_patch == 0
+    with pytest.raises(SystemExit):
+        main(["make", "--help"])
+    assert f"(default {forge.MIN_PATCH:g}; 0 keeps them)" in " ".join(
+        capsys.readouterr().out.split()
+    )
 
 
 def test_allow_abrasive_reaches_the_job(photo, tmp_path):

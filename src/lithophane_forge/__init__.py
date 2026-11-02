@@ -1,6 +1,7 @@
 """lithophane-forge: turn a photo into a printable lithophane and a PrusaSlicer project."""
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -42,6 +43,8 @@ def _number(kind=float, low: float | None = None, high: float | None = None):
             value = kind(text)
         except ValueError:
             raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+        if not math.isfinite(value):
+            raise argparse.ArgumentTypeError(f"not a finite number: {text!r}")
         if low is not None and value < low:
             raise argparse.ArgumentTypeError(f"must be at least {low:g} (got {text})")
         if high is not None and value > high:
@@ -78,7 +81,7 @@ class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 
 
 def parser() -> argparse.ArgumentParser:
-    from .forge import LIGHTS, MODES, SHAPES, VIEWS
+    from .forge import LIGHTS, MIN_PATCH, MODES, SHAPES, VIEWS
     from .printers import DEFAULT_MATERIAL, DEFAULT_PRINTER, MATERIALS, PRINTERS
 
     p = argparse.ArgumentParser(
@@ -237,6 +240,12 @@ def parser() -> argparse.ArgumentParser:
     )
     col.add_argument("--allow-abrasive", action="store_true", help=ABRASIVE_HELP)
     col.add_argument("--light", choices=LIGHTS, help=LIGHT_HELP)
+    col.add_argument(
+        "--min-patch",
+        type=_number(float, 0),
+        help="smallest island or hole in a layer, in mm²: smaller ones print as blobs and "
+        f"are merged into the area around them (default {MIN_PATCH:g}; 0 keeps them)",
+    )
     prn = m.add_argument_group("printer")
     prn.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
     prn.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
@@ -266,7 +275,7 @@ def parser() -> argparse.ArgumentParser:
 
 def job_from(args: argparse.Namespace):
     from . import image, optics, printers
-    from .forge import COLOR_RANGE, Job
+    from .forge import COLOR_RANGE, MIN_PATCH, Job
 
     try:
         setup = printers.setup(
@@ -279,6 +288,9 @@ def job_from(args: argparse.Namespace):
         mode = args.mode or ("color" if args.shape in ("flat", "shaped") else "mono")
         mono = mode == "mono"
         light = args.light or ("back" if mono else "front")
+        if mono and args.min_patch is not None:
+            why = "--mode mono" if args.mode == "mono" else f"--shape {args.shape} (always mono)"
+            raise ValueError(f"--min-patch is for colour prints, not {why}")
         if not mono and args.td is not None:
             raise ValueError(
                 "--td is for white prints (--mode mono); in colour the filaments' own TD "
@@ -310,6 +322,7 @@ def job_from(args: argparse.Namespace):
         allow_abrasive=args.allow_abrasive,
         color_range=color_range,
         light=light,
+        min_patch=MIN_PATCH if args.min_patch is None else args.min_patch,
         width=args.width,
         height=args.height,
         arc=args.arc,
