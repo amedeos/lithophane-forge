@@ -25,22 +25,36 @@ def load(path: Path) -> np.ndarray:
 def _load(path: Path) -> np.ndarray:
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)
-        if im.mode.startswith("I") or im.mode == "F":
-            # 16-bit grey (I;16, or I from older Pillow) and float: convert("RGB") would clip
-            # them at 255 instead of scaling them
-            grey = np.asarray(im, dtype=np.float64)
-            top = grey.max(initial=0)
-            if im.mode.startswith("I;16") or top > 255:
-                grey /= 65535
-            elif im.mode != "F" or top > 1:
-                grey /= 255
-            return np.repeat(np.clip(grey, 0, 1)[..., None], 3, axis=2)
-        if im.mode in ("RGBA", "LA", "P"):
-            im = im.convert("RGBA")
-            white = Image.new("RGBA", im.size, (255, 255, 255, 255))
-            im = Image.alpha_composite(white, im)
-        rgb = np.asarray(im.convert("RGB"), dtype=np.float64) / 255
+        if is_deep(im):
+            return np.repeat(deep_grey(im)[..., None], 3, axis=2)
+        rgb = np.asarray(flatten(im, (255, 255, 255)).convert("RGB"), dtype=np.float64) / 255
     return rgb
+
+
+def is_deep(im: Image.Image) -> bool:
+    """16-bit grey (I;16, or I from older Pillow) or float: see `deep_grey`."""
+    return im.mode.startswith("I") or im.mode == "F"
+
+
+def deep_grey(im: Image.Image, dtype=np.float64) -> np.ndarray:
+    """A 16-bit grey or float image as values from 0 to 1, scaled by its mode (I;16 always
+    by 65535); convert("RGB") or convert("L") would clip it at 255 instead of scaling it.
+    Photos and focus masks use the same rule."""
+    grey = np.asarray(im, dtype=dtype)
+    top = grey.max(initial=0)
+    if im.mode.startswith("I;16") or top > 255:
+        grey /= 65535
+    elif im.mode != "F" or top > 1:
+        grey /= 255
+    return np.clip(grey, 0, 1)
+
+
+def flatten(im: Image.Image, background: tuple[int, int, int]) -> Image.Image:
+    """An image with transparency painted over a plain background; others as they are."""
+    if im.mode in ("RGBA", "LA", "P", "PA") or "transparency" in im.info:
+        im = im.convert("RGBA")
+        return Image.alpha_composite(Image.new("RGBA", im.size, (*background, 255)), im)
+    return im
 
 
 def srgb_to_linear(c: np.ndarray) -> np.ndarray:
@@ -77,15 +91,44 @@ def parse_crop(text: str) -> tuple[int, int, int, int]:
     return parts[0], parts[1], parts[2], parts[3]
 
 
+def _crop_box(
+    size: tuple[int, int], box: tuple[int, int, int, int] | None
+) -> tuple[int, int, int, int]:
+    """The user's crop (X, Y, W, H) inside a photo of `size` (width, height), as x0, y0, x1,
+    y1 in photo pixels."""
+    w, h = size
+    if not box:
+        return 0, 0, w, h
+    x, y, bw, bh = box
+    x0, y0, x1, y1 = max(x, 0), max(y, 0), min(x + bw, w), min(y + bh, h)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError("the crop lies outside the photo")
+    return x0, y0, x1, y1
+
+
 def crop(rgb: np.ndarray, box: tuple[int, int, int, int] | None) -> np.ndarray:
     """The user's crop (X, Y, W, H in photo pixels), or the whole photo."""
     if not box:
         return rgb
-    x, y, w, h = box
-    rgb = rgb[max(y, 0) : y + h, max(x, 0) : x + w]
-    if rgb.size == 0:
-        raise ValueError("the crop lies outside the photo")
-    return rgb
+    x0, y0, x1, y1 = _crop_box((rgb.shape[1], rgb.shape[0]), box)
+    return rgb[y0:y1, x0:x1]
+
+
+def window(
+    size: tuple[int, int], aspect: float, box: tuple[int, int, int, int] | None = None
+) -> tuple[int, int, int, int]:
+    """The part of a photo of `size` (width, height) that `frame` keeps, as x0, y0, x1, y1
+    in photo pixels: first the user's crop, then the largest centred window with `aspect`
+    (width / height). A focus map in photo space follows the photo with it."""
+    x0, y0, x1, y1 = _crop_box(size, box)
+    w, h = x1 - x0, y1 - y0
+    if w / h > aspect:
+        nw = max(1, round(h * aspect))
+        x0 += (w - nw) // 2
+        return x0, y0, x0 + nw, y1
+    nh = max(1, round(w / aspect))
+    y0 += (h - nh) // 2
+    return x0, y0, x1, y0 + nh
 
 
 def frame(
@@ -93,15 +136,8 @@ def frame(
 ) -> np.ndarray:
     """Crop the photo to `aspect` (width / height): first the user's crop, then the
     largest centred window with that aspect."""
-    rgb = crop(rgb, box)
-    h, w = rgb.shape[:2]
-    if w / h > aspect:
-        nw = max(1, round(h * aspect))
-        x0 = (w - nw) // 2
-        return rgb[:, x0 : x0 + nw]
-    nh = max(1, round(w / aspect))
-    y0 = (h - nh) // 2
-    return rgb[y0 : y0 + nh]
+    x0, y0, x1, y1 = window((rgb.shape[1], rgb.shape[0]), aspect, box)
+    return rgb[y0:y1, x0:x1]
 
 
 def resize(rgb: np.ndarray, rows: int, cols: int) -> np.ndarray:
