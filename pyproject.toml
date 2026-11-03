@@ -17,6 +17,12 @@ dependencies = [
     "svgelements>=1.9.6",
 ]
 
+[project.optional-dependencies]
+# --focus subject: segmentation models through ONNX Runtime. Install one of the two:
+# vision runs on the CPU; vision-gpu also uses an NVIDIA card (CUDA 13), about 1.5 GB more.
+vision = ["onnxruntime>=1.31"]
+vision-gpu = ["onnxruntime-gpu[cuda,cudnn]>=1.31"]
+
 [project.scripts]
 lithophane-forge = "lithophane_forge:main"
 
@@ -30,7 +36,14 @@ dev = ["pytest>=8.3", "ruff>=0.16", "trimesh>=4.5.0"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
-markers = ["slicer: needs the PrusaSlicer command line (deselect with -m 'not slicer')"]
+markers = [
+    "slicer: needs the PrusaSlicer command line (deselect with -m 'not slicer')",
+    "vision: needs onnxruntime and the models (uv sync --extra vision; lithophane-forge models --download)",
+]
 
 [tool.ruff]
 line-length = 100
+
+[tool.uv]
+# onnxruntime and onnxruntime-gpu install the same module: one or the other
+conflicts = [[{ extra = "vision" }, { extra = "vision-gpu" }]]

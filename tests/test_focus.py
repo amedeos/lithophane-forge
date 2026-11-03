@@ -9,7 +9,15 @@ from lithophane_forge import focus, image, render
 
 @pytest.mark.parametrize(
     "text, kind",
-    [("centre", "centre"), ("Center", "centre"), ("10, 20,30,40", "box"), ("me.png", "mask")],
+    [
+        ("centre", "centre"),
+        ("Center", "centre"),
+        ("subject", "subject"),
+        ("Subject", "subject"),
+        ("./subject", "mask"),
+        ("10, 20,30,40", "box"),
+        ("me.png", "mask"),
+    ],
 )
 def test_parse(text, kind):
     spec = focus.parse(text)
@@ -17,7 +25,7 @@ def test_parse(text, kind):
     if kind == "box":
         assert spec.box == (10, 20, 30, 40)
     if kind == "mask":
-        assert spec.path.name == "me.png"
+        assert spec.path == Path(text)
 
 
 @pytest.mark.parametrize("text", ["1,2,3", "1,2,0,4", "1,2,3,4,5"])
@@ -190,3 +198,30 @@ def test_a_mask_with_other_proportions_gets_a_note(tmp_path):
     assert focus.mask_note(focus.parse(str(tmp_path / "tall.png")), size) is None
     assert focus.mask_note(focus.parse(str(tmp_path / "turned.jpg")), size) is None
     assert focus.mask_note(focus.parse("centre"), size) is None
+
+
+def test_subject_needs_the_photo():
+    """photo_map has only the photo's size: --focus subject goes through build."""
+    with pytest.raises(ValueError, match="use focus.build"):
+        focus.photo_map(focus.parse("subject"), (40, 30), (0, 0, 40, 30))
+
+
+def test_build_without_models_is_photo_map():
+    rgb = np.zeros((30, 40, 3))
+    values, found = focus.build(focus.parse("centre"), rgb, (0, 0, 40, 30))
+    assert found is None
+    assert np.array_equal(values, focus.photo_map(focus.parse("centre"), (40, 30), (0, 0, 40, 30)))
+
+
+def test_build_runs_the_models(fake_subject):
+    """--focus subject: the map comes from vision.subject_map at the map's size, 8 bits."""
+    rgb = np.zeros((3000, 4000, 3), dtype=np.float32)
+    values, found = focus.build(focus.parse("subject"), rgb, (0, 0, 4000, 3000), "cpu")
+    assert values.shape == (750, 1000) and fake_subject == ["cpu"]
+    assert found.models == ("u2net_human_seg", "modnet", "isnet")
+    assert np.array_equal(values, np.round(values * 255) / 255)
+
+
+def test_no_subject_message():
+    with pytest.raises(ValueError, match="found no subject in the picture.*for a landscape"):
+        focus.check_subject(np.zeros((4, 4), bool), "subject")

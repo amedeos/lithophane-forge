@@ -38,3 +38,23 @@ def petg():
 def no_slicer(monkeypatch):
     """Run `make` as on a machine without PrusaSlicer."""
     monkeypatch.setattr(slicer, "command", lambda: None)
+
+
+@pytest.fixture
+def fake_subject(monkeypatch):
+    """--focus subject without ONNX Runtime or the models: they "find" a disc in the middle
+    of the photo. Returns the list of the devices asked for."""
+    from lithophane_forge import vision
+
+    devices = []
+
+    def subject_map(photo, size, device="auto"):
+        devices.append(device)
+        w, h = size
+        y, x = np.mgrid[0:h, 0:w]
+        disc = np.hypot(x + 0.5 - w / 2, y + 0.5 - h / 2) < min(w, h) / 3
+        return disc.astype(float), vision.Run(tuple(vision.models()), "CPU", 0.25)
+
+    monkeypatch.setattr(vision, "available", lambda: True)
+    monkeypatch.setattr(vision, "subject_map", subject_map)
+    return devices

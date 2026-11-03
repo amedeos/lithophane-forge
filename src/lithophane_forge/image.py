@@ -140,8 +140,13 @@ def frame(
     return rgb[y0:y1, x0:x1]
 
 
+def to_pil(values: np.ndarray) -> Image.Image:
+    """Floats from 0 to 1 (grey or RGB) as an 8-bit image, rounded to the nearest level."""
+    return Image.fromarray((np.clip(values, 0, 1) * 255 + 0.5).astype(np.uint8))
+
+
 def resize(rgb: np.ndarray, rows: int, cols: int) -> np.ndarray:
-    im = Image.fromarray((np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8))
+    im = to_pil(rgb)
     im = im.resize((cols, rows), Image.LANCZOS)
     return np.asarray(im, dtype=np.float64) / 255
 
