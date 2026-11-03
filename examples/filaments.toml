@@ -4,6 +4,13 @@
 # for better results (td = mm of filament that let about 10 % of the light through).
 # Mark a filament that needs a hardened steel nozzle with abrasive = true: it is then
 # used only with --allow-abrasive.
+#
+# In room light (the default), a translucent filament (td above 1 mm, and not a white or
+# grey with td up to 4 mm) is left out unless it has its measured absorption and
+# scattering, both in 1/mm, or you pass --allow-unmeasured. Add them like this:
+#   k = [0.220, 0.559, 11.9]  # absorption per channel: red, green, blue
+#   s = 0.0127                # scattering
+# With this list in room light, red, yellow gold, orange and blue are left out for now.
 
 [[filament]]
 name = "white"

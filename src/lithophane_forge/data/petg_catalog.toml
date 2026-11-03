@@ -4,6 +4,12 @@
 # (read on 2026-11-01). Prusa measured these values for HueForge; lithophane-forge uses TD
 # as the thickness that lets about 10 % of the light through, which is an approximation.
 # Rows without a TD on that page are left out.
+#
+# k (absorption per channel, red, green, blue) and s (scattering), both in 1/mm, are our own
+# measurements, not Prusa's. They drive the light model of a picture in room light: hex and TD
+# cannot describe a translucent coloured or nearly clear filament, so without k and s such
+# filaments are left out in room light (--allow-unmeasured uses them). The values below are preliminary: fitted on
+# 2026-11-02 from one phone photo of a print, to be replaced by a calibration print.
 
 source = "https://help.prusa3d.com/article/hueforge-filament-transparency-values-and-hexcodes_762314"
 material = "petg"
@@ -32,6 +38,8 @@ td = 2.6
 name = "Prusament PETG Yellow Gold"
 hex = "#9A8523"
 td = 9.2
+k = [0.220, 0.559, 11.9]  # preliminary, see the top of this file
+s = 0.0127
 
 [[filament]]
 name = "Prusament PETG Prusa Orange"
@@ -87,6 +95,8 @@ td = 3.0
 name = "Prusament PETG Ultramarine Blue Transparent"
 hex = "#2B3B60"
 td = 8.0
+k = [9.70, 3.80, 1.96]  # preliminary, see the top of this file
+s = 0.203
 
 [[filament]]
 name = "Prusament PETG Urban Grey"

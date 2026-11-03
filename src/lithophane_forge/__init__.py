@@ -35,6 +35,10 @@ class UsageError(Exception):
 ABRASIVE_HELP = (
     "also suggest abrasive filaments (Tungsten 75 %%): only with a hardened steel nozzle"
 )
+UNMEASURED_HELP = (
+    "room light: also suggest translucent filaments without measured k and s "
+    "(their colour in the print is a guess)"
+)
 
 
 def _number(kind=float, low: float | None = None, high: float | None = None):
@@ -113,6 +117,9 @@ def parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--filaments", type=Path, help="your filaments (TOML) instead of the catalog")
     a.add_argument("--allow-abrasive", action="store_true", help=ABRASIVE_HELP)
+    a.add_argument(
+        "--allow-unmeasured", action="store_true", help=UNMEASURED_HELP + " (with --colors)"
+    )
     a.add_argument("--light", choices=LIGHTS, help=LIGHT_HELP + " (with --colors)")
 
     m = sub.add_parser(
@@ -239,6 +246,7 @@ def parser() -> argparse.ArgumentParser:
         "Prusament PETG catalog",
     )
     col.add_argument("--allow-abrasive", action="store_true", help=ABRASIVE_HELP)
+    col.add_argument("--allow-unmeasured", action="store_true", help=UNMEASURED_HELP)
     col.add_argument("--light", choices=LIGHTS, help=LIGHT_HELP)
     col.add_argument(
         "--min-patch",
@@ -291,6 +299,14 @@ def job_from(args: argparse.Namespace):
         if mono and args.min_patch is not None:
             why = "--mode mono" if args.mode == "mono" else f"--shape {args.shape} (always mono)"
             raise ValueError(f"--min-patch is for colour prints, not {why}")
+        if args.allow_unmeasured and (mono or light != "front"):
+            if not mono:
+                why = "--light back"
+            elif args.mode == "mono":
+                why = "--mode mono"
+            else:
+                why = f"--shape {args.shape} (always mono)"
+            raise ValueError(f"--allow-unmeasured is for colour pictures in room light, not {why}")
         if not mono and args.td is not None:
             raise ValueError(
                 "--td is for white prints (--mode mono); in colour the filaments' own TD "
@@ -320,6 +336,7 @@ def job_from(args: argparse.Namespace):
         colors=args.colors,
         filaments=args.filaments,
         allow_abrasive=args.allow_abrasive,
+        allow_unmeasured=args.allow_unmeasured,
         color_range=color_range,
         light=light,
         min_patch=MIN_PATCH if args.min_patch is None else args.min_patch,
@@ -398,6 +415,12 @@ def cmd_analyze(args) -> int:
         raise UsageError("--colors and --light are for colour prints, not --mode mono")
     if args.light and not args.colors:
         raise UsageError("--light sets the light of the colour plan: add --colors N")
+    if args.allow_unmeasured and not args.colors:
+        raise UsageError("--allow-unmeasured is for the colour plan: add --colors N")
+    if args.allow_unmeasured and args.light == "back":
+        raise UsageError(
+            "--allow-unmeasured is for colour pictures in room light, not --light back"
+        )
     if not args.photo.is_file():
         raise UsageError(f"no such photo: {args.photo}")
     if args.filaments and not args.filaments.is_file():
@@ -427,11 +450,13 @@ def cmd_analyze(args) -> int:
         s = printers.setup()
         small = image.resize(rgb, 240, max(1, round(240 * rgb.shape[1] / rgb.shape[0])))
         h = palette.heights(*COLOR_RANGE, s.first_layer, s.layer)
+        light = args.light or "front"
         try:
-            choices, source = palette.choices(args.filaments, args.allow_abrasive)
+            choices, source = palette.choices(
+                args.filaments, args.allow_abrasive, light, args.allow_unmeasured
+            )
         except ValueError as e:
             raise UsageError(str(e)) from None
-        light = args.light or "front"
         plan = palette.plan(palette.target(small), args.colors, h, choices, source, light)
         n = len(plan.real.filaments)
         lit = "light from the front" if light == "front" else "light from behind"
