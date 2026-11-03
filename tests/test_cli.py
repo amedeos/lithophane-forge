@@ -104,6 +104,11 @@ def test_analyze(photo, capsys):
         (["--mode", "mono", "--light", "front"], "not --mode mono"),
         (["--allow-unmeasured"], "add --colors"),
         (["--colors", "3", "--light", "back", "--allow-unmeasured"], "not --light back"),
+        (["--focus", "centre"], "add --colors"),
+        (["--colors", "2", "--focus-floor", "0.2"], "--focus-floor goes with --focus"),
+        (["--colors", "2", "--focus", "nothing.png"], "no such focus mask"),
+        (["--colors", "2", "--focus", "1,2,3"], "X,Y,W,H"),
+        (["--colors", "2", "--focus", "999,999,5,5"], "outside the photo"),
     ],
 )
 def test_analyze_options_that_do_nothing_are_errors(photo, capsys, argv, message):
@@ -144,6 +149,12 @@ def test_help_shows_no_none_defaults(capsys):
             ["make", "{photo}", "--shape", "curved", "--allow-unmeasured"],
             "curved (always mono)",
         ),
+        (["make", "{photo}", "--mode", "mono", "--focus", "centre"], "not --mode mono"),
+        (["make", "{photo}", "--shape", "cylinder", "--focus", "centre"], "(always mono)"),
+        (["make", "{photo}", "--focus-floor", "0.2"], "--focus-floor goes with --focus"),
+        (["make", "{photo}", "--focus", "missing.png"], "no such focus mask"),
+        (["make", "{photo}", "--focus", "1,2,3"], "X,Y,W,H"),
+        (["make", "{photo}", "--focus", "500,500,10,10"], "outside the photo"),
     ],
 )
 def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
@@ -160,6 +171,8 @@ def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
         ["--min-patch", "inf"],
         ["--min-patch", "nan"],
         ["--width", "inf"],
+        ["--focus", "centre", "--focus-floor", "0"],
+        ["--focus", "centre", "--focus-floor", "1.5"],
     ],
 )
 def test_bad_option_exits_with_2(argv):
@@ -224,3 +237,20 @@ def test_calibrate_errors_exit_with_2(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(calibrate, "make", fail)
     assert main(["calibrate", "-o", str(tmp_path)]) == 2
     assert "other presets" in capsys.readouterr().err
+
+
+def test_focus_reaches_the_job(photo):
+    from lithophane_forge import focus, job_from, parser
+
+    job = job_from(parser().parse_args(["make", str(photo), "--focus", "centre"]))
+    assert (job.focus, job.focus_floor) == ("centre", focus.FLOOR)
+    args = ["make", str(photo), "--focus", str(photo), "--focus-floor", "0.05"]
+    job = job_from(parser().parse_args(args))
+    assert job.focus == str(photo) and job.focus_floor == 0.05
+    assert job_from(parser().parse_args(["make", str(photo)])).focus is None
+
+
+def test_analyze_with_focus(photo, capsys):
+    assert main(["analyze", str(photo), "--colors", "2", "--focus", "10,10,60,40"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("on the subject") == 2  # the ideal colours and the filaments

@@ -482,3 +482,51 @@ def test_ideal_colours_come_from_the_photo(heights):
     found = P.photo_colours(P.Fitter(t, heights).sample)
     assert len(found) == (P.PHOTO_COLOURS + len(P.GREYS)) * len(P.TD_STEPS)
     assert all(P.TD_RANGE[0] <= f.td <= P.TD_RANGE[1] for f in found)
+
+
+def test_a_fitter_without_weights_samples_as_before(heights):
+    """No --focus, no change: the sample is the one NumPy draws without p (with p, even an
+    even one, it draws another), so every plan without a focus stays the same."""
+    t = P.target(sunset())
+    flat = t.reshape(-1, 3)
+    old = flat[np.random.default_rng(0).choice(len(flat), 3000, replace=False)]
+    assert np.array_equal(P.Fitter(t, heights).sample, old)
+    columns = np.zeros((90, 120, 3))
+    columns[..., 0] = np.arange(120)  # tells which column a sampled pixel comes from
+    weights = np.where(np.arange(120) < 12, 1.0, 0.1)  # a tenth of the pixels weighs 10 x
+    fitter = P.Fitter(columns, heights, weights=np.broadcast_to(weights, (90, 120)))
+    assert 0.48 < (fitter.sample[:, 0] < 12).mean() < 0.58  # 1080 / (1080 + 972), not 0.1
+
+
+def disc_photo(colour=(0.1, 0.35, 0.8)):
+    """A sunset with a small blue disc: a colour far from the sunset's path."""
+    rgb = sunset()
+    y, x = np.mgrid[0 : rgb.shape[0], 0 : rgb.shape[1]]
+    disc = np.hypot(x - 85, y - 30) < 12  # 4 % of the picture
+    rgb[disc] = colour
+    return rgb, disc
+
+
+def test_focus_serves_the_subject(heights):
+    """With the disc as the focus, the plan's colours go to the disc."""
+    rgb, disc = disc_photo()
+    t = P.target(rgb)
+    choices, source = P.choices(None, False, "front", False)
+    plain = P.plan(t, 3, heights, choices, source, "front")
+    assert plain.real.focus_de is None
+    before = P.evaluate(plain.real.filaments, plain.real.starts, heights, t, "front", disc)
+    focused = P.plan(t, 3, heights, choices, source, "front", disc.astype(float))
+    assert focused.real.focus_de < 0.5 * before.focus_de
+    assert focused.ideal.focus_de < focused.real.focus_de + 5
+    ideal_before = P.evaluate(plain.ideal.filaments, plain.ideal.starts, heights, t, "front", disc)
+    assert focused.ideal.focus_de < 0.5 * ideal_before.focus_de
+
+
+def test_the_subject_delta_e_is_the_mean_over_it(heights):
+    fit = P.evaluate([P.white()], np.array([0.0]), heights, P.target(sunset()), "front")
+    rows = np.zeros((90, 120), dtype=bool)
+    rows[:30] = True
+    one = P.score(fit, P.target(sunset()), np.zeros((90, 120), dtype=int), rows)
+    de = P.delta_e2000(P.target(sunset())[:30].reshape(-1, 3), P.lab(fit.colours[[0]]))
+    assert one.focus_de == pytest.approx(de.mean())
+    assert P.score(fit, P.target(sunset()), np.zeros((90, 120), dtype=int)).focus_de is None

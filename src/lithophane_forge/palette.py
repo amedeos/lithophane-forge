@@ -45,6 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .focus import FLOOR, SUBJECT
 from .image import linear_to_srgb, srgb_to_linear
 
 LN10 = np.log(10)
@@ -174,6 +175,7 @@ class Fit:
     colours: np.ndarray = field(repr=False)  # (n, 3) linear colour seen at each height
     mean_de: float = 0.0  # CIEDE2000 between the photo and the print, over the pixels
     p95_de: float = 0.0
+    focus_de: float | None = None  # the mean over the subject's pixels (with --focus)
 
     def colour_changes(self, layer: float) -> list[tuple[float, str]]:
         """PrusaSlicer's M600 list: the top of the first layer of every new filament."""
@@ -377,10 +379,19 @@ class Fitter:
         sample: int = 3000,
         seed: int = 0,
         light: str = "back",
+        weights: np.ndarray | None = None,
     ):
+        """`weights` (one per pixel, all above 0): pixels are sampled in proportion to
+        them, with repeats, so the fit serves the heavy ones first (the subject, with
+        --focus). Without repeats a small subject would run out of pixels and weigh less
+        than its weight."""
         flat = target_lab.reshape(-1, 3)
         rng = np.random.default_rng(seed)
-        idx = rng.choice(len(flat), min(sample, len(flat)), replace=False)
+        if weights is None:  # no p: with one, NumPy draws another sample even if p is even
+            idx = rng.choice(len(flat), min(sample, len(flat)), replace=False)
+        else:
+            p = np.asarray(weights, np.float64).ravel()
+            idx = rng.choice(len(flat), sample, p=p / p.sum())
         self.sample = flat[idx]
         self._w = self.sample * WEIGHTS
         self._w2 = (self._w**2).sum(1)
@@ -604,17 +615,23 @@ def kmeans_lab(sample: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
     return centres[np.argsort(-centres[:, 0], kind="stable")]
 
 
-def evaluate(filaments, starts, h, target_lab, light: str = "back") -> Fit:
+def evaluate(filaments, starts, h, target_lab, light: str = "back", subject=None) -> Fit:
     colours = curve(filaments, starts, h, light)
     fit = Fit(filaments, starts, h, colours)
-    return score(fit, target_lab, assign(target_lab, lab(colours)))
+    return score(fit, target_lab, assign(target_lab, lab(colours)), subject)
 
 
-def score(fit: Fit, target_lab: np.ndarray, idx: np.ndarray) -> Fit:
+def score(fit: Fit, target_lab: np.ndarray, idx: np.ndarray, subject=None) -> Fit:
     """The fit, with the Delta E of the given heights (an index per pixel): for example the
-    heights that print, after they were smoothed."""
+    heights that print, after they were smoothed. `subject` (a bool per pixel) also gives
+    the mean over the subject's pixels."""
     de = delta_e2000(target_lab.reshape(-1, 3), lab(fit.colours)[idx.ravel()])
-    return replace(fit, mean_de=float(de.mean()), p95_de=float(np.percentile(de, 95)))
+    focus_de = None
+    if subject is not None and np.any(subject):
+        focus_de = float(de[np.asarray(subject).ravel()].mean())
+    return replace(
+        fit, mean_de=float(de.mean()), p95_de=float(np.percentile(de, 95)), focus_de=focus_de
+    )
 
 
 def assign(target_lab: np.ndarray, curve_lab: np.ndarray) -> np.ndarray:
@@ -792,12 +809,19 @@ def plan(
     choices: list[Filament],
     source: str,
     light: str = "back",
+    focus: np.ndarray | None = None,
+    floor: float = FLOOR,
 ) -> Plan:
     """Ideal colours for the photo, the closest real filaments, and their change heights.
 
     The ideal colours come from the photo alone: `choices` is used only after them, to
     pick the real filaments. Fewer than k filaments may come back when the photo does not
     need them all.
+
+    `focus` (0 to 1 per pixel, see `focus.py`) weighs the pixels floor + (1 - floor) x
+    focus, so colours and heights serve the subject first; the fits then also give the
+    Delta E over the subject (focus at least SUBJECT). The ideal colours still depend on the
+    photo alone: the focus is part of the photo, not of a filament list.
 
     The ideal fit moves colours and heights, not the order of the filaments, so it starts
     from k-means colours in a few orders: lightest first for light from behind (the base
@@ -806,7 +830,9 @@ def plan(
     in a local minimum. So the same search that picks real filaments also runs on the photo's own colours
     (`photo_colours`), on layer tops, and Powell refines its result. The ideal is the best
     of all these, compared on layer tops."""
-    fitter = Fitter(target_lab, h, light=light)
+    weights = None if focus is None else floor + (1 - floor) * np.asarray(focus)
+    fitter = Fitter(target_lab, h, light=light, weights=weights)
+    subject = None if focus is None else np.asarray(focus) >= SUBJECT
     span = h[-1] - h[0]
     even = np.concatenate([[0.0], h[0] + span * np.arange(1, k) / k])
     orders = (False, True) if light == "front" else (False,)  # True: darkest first
@@ -836,8 +862,8 @@ def plan(
     real, real_starts = _merge(picked, real_starts)
     real, real_starts, _ = _on_layers(real, real_starts, h)
     real, real_starts = _merge(real, real_starts)
-    ideal_fit = evaluate(ideal, starts, h, target_lab, light)
-    real_fit = evaluate(real, real_starts, h, target_lab, light)
+    ideal_fit = evaluate(ideal, starts, h, target_lab, light, subject)
+    real_fit = evaluate(real, real_starts, h, target_lab, light, subject)
     return Plan(ideal_fit, real_fit, matches, source, list(choices))
 
 

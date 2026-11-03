@@ -9,7 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import image, mesh, profiles, render, slicer, threemf
+from . import focus, image, mesh, profiles, render, slicer, threemf
+from .focus import FLOOR as FOCUS_FLOOR
 from .image import Tone
 from .optics import Optics
 from .palette import LIGHTS
@@ -20,6 +21,7 @@ MODES = ("mono", "color")
 VIEWS = ("flat", "relief")
 COLOR_RANGE = (0.6, 3.0)  # mm: colour panels, from the thinnest stack to the frame
 MIN_PATCH = 1.0  # mm²: colour panels, the smallest island or hole a layer keeps
+MAX_COLORS = 8  # colour panels: filaments
 STANDING = {"flat", "curved", "cylinder"}  # the others print lying on the bed
 DEFAULT_WIDTH = 100.0
 DEFAULT_DIAMETER = 80.0
@@ -46,6 +48,8 @@ class Job:
     color_range: tuple[float, float] = COLOR_RANGE
     light: str = "back"  # colour mode: "front" for a picture you look at in room light
     min_patch: float = MIN_PATCH  # colour mode: see remove_specks (0: off)
+    focus: str | None = None  # colour mode: the subject (a mask image, X,Y,W,H or centre)
+    focus_floor: float = FOCUS_FLOOR  # the weight of the rest of the picture (focus.py)
     width: float | None = None  # outer size in mm, frame included
     height: float | None = None
     arc: float = 120.0  # degrees, for shape="curved"
@@ -126,8 +130,8 @@ class Job:
         if self.mode == "color":
             if self.shape not in ("flat", "shaped"):
                 raise ValueError("colour panels print lying: use --shape flat or shaped")
-            if not 2 <= self.colors <= 8:
-                raise ValueError("--colors must be between 2 and 8")
+            if not 2 <= self.colors <= MAX_COLORS:
+                raise ValueError(f"--colors must be between 2 and {MAX_COLORS}")
             lo, hi = self.color_range
             if not 0.3 <= lo < hi:
                 raise ValueError(
@@ -147,6 +151,12 @@ class Job:
                 raise ValueError("--invert and --clahe work in mono mode only (--mode mono)")
             if not math.isfinite(self.min_patch) or self.min_patch < 0:
                 raise ValueError("--min-patch must be a number, 0 (off) or more")
+        if self.focus is not None:
+            if self.mode != "color":
+                raise ValueError("--focus is for colour prints, not --mode mono")
+            focus.parse(self.focus)  # a box that is not X,Y,W,H
+            if not focus.MIN_FLOOR <= self.focus_floor <= 1:
+                raise ValueError(f"--focus-floor must be between {focus.MIN_FLOOR:g} and 1")
         if self.hole and self.shape not in ("flat", "shaped"):
             raise ValueError("--hole works with the flat and shaped panels")
         if self.stand and self.shape != "flat":
@@ -200,6 +210,7 @@ class Result:
     colour: object = None  # palette.Plan in colour mode
     colour_changes: list[tuple[float, str]] = field(default_factory=list)
     speck_points: int = 0  # colour mode: grid points of the smallest patch a layer keeps
+    subject_share: float | None = None  # with --focus: the share of the picture it marks
 
 
 def grid(
@@ -295,6 +306,9 @@ class ColourMap:
     photo: np.ndarray
     speck_points: int = 0  # remove_specks: islands and holes below this many points go
     notes: list[str] = field(default_factory=list)
+    focus: np.ndarray | None = None  # with --focus: the map in photo space (focus.png)
+    subject: np.ndarray | None = None  # the picture's grid points that are the subject
+    subject_share: float | None = None  # their share of the points you see
 
 
 def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
@@ -308,10 +322,24 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     in_v, in_u, _ = picture_cells(job, lay)  # colour panels are never cylinders: one copy
     u0, u1, v0, v1 = lay.photo_box
     ci, ri = int(in_u.sum()), int(in_v.sum())
-    photo = image.frame(rgb, (u1 - u0) / (v1 - v0), job.crop)
+    size = (rgb.shape[1], rgb.shape[0])
+    win = image.window(size, (u1 - u0) / (v1 - v0), job.crop)
+    photo = rgb[win[1] : win[3], win[0] : win[2]]
     target = palette.target(image.resize(photo, ri, ci), job.tone.levels, job.tone.gamma)
     box = np.ix_(in_v, in_u)
     seen = visible_points(job, lay)
+    values = weight = subject = share = None
+    notes = []
+    if job.focus is not None:
+        spec = focus.parse(job.focus)
+        values = focus.photo_map(spec, size, win)
+        # no subject where a shaped panel's frame hides the picture: those points keep the
+        # weight of the rest, as they have without --focus
+        weight = np.where(seen[box], focus.on_grid(values, size, win, ri, ci), 0.0)
+        subject = weight >= focus.SUBJECT
+        focus.check_subject(subject, job.focus)
+        share = float(subject[seen[box]].mean())
+        notes += [n for n in [focus.mask_note(spec, size)] if n]
     points = round(job.min_patch / lay.pitch**2)
     if points >= seen.sum():
         raise ValueError(
@@ -323,7 +351,7 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     choices, source = palette.choices(
         job.filaments, job.allow_abrasive, job.light, job.allow_unmeasured
     )
-    plan = palette.plan(target, job.colors, h, choices, source, job.light)
+    plan = palette.plan(target, job.colors, h, choices, source, job.light, weight, job.focus_floor)
     frame = int(np.clip(np.searchsorted(h, job.frame_thickness + 1e-9) - 1, 0, len(h) - 1))
 
     def smoothed(fit):
@@ -333,7 +361,8 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
         full[box] = median_filter(palette.assign(target, palette.lab(fit.colours)), size=3)
         idx = remove_specks(full, points, ~seen, frame)[box]
         inside = seen[box]
-        return idx, palette.score(fit, target[inside], idx[inside])
+        on_subject = None if subject is None else subject[inside]
+        return idx, palette.score(fit, target[inside], idx[inside], on_subject)
 
     real_idx, real = smoothed(plan.real)
     ideal_idx, ideal = smoothed(plan.ideal)
@@ -346,7 +375,6 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
         out[box] = fit.colours[idx]
         return out
 
-    notes = []
     top = np.searchsorted(real.starts, h[real_idx[seen[box]]] - 1e-6, side="right") - 1
     if len(real.filaments) > 1 and not (top == len(real.filaments) - 1).any():
         where = "only on the frame" if job.frame > 0 else "nowhere"
@@ -355,8 +383,8 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
             f"once the heights are smoothed, no point of the picture reaches the last "
             f"filament, {real.filaments[-1].name}: it shows {where}{why}"
         )
-    cmap = ColourMap(plan, t, sim(ideal, ideal_idx), sim(real, real_idx), photo, points, notes)
-    return cmap
+    sims = sim(ideal, ideal_idx), sim(real, real_idx)
+    return ColourMap(plan, t, *sims, photo, points, notes, values, subject, share)
 
 
 def visible_points(job: Job, lay: Layout) -> np.ndarray:
@@ -558,6 +586,7 @@ def make(job: Job) -> Result:
         res.colour = cmap.plan
         res.colour_changes = cmap.plan.real.colour_changes(job.setup.layer)
         res.speck_points = cmap.speck_points
+        res.subject_share = cmap.subject_share
         res.notes += colour_notes(job, cmap.plan) + cmap.notes
     else:
         t_view, photo = thickness_map(job, rgb, lay)
@@ -578,7 +607,9 @@ def make(job: Job) -> Result:
 
     folder = job.folder
     folder.mkdir(parents=True, exist_ok=True)
-    clear_outputs(folder, job.stem, keep=job.photo)
+    clear_outputs(folder, job.stem, keep=job.photo)  # a --focus mask here was read already
+    if cmap is not None and cmap.focus is not None:
+        res.files["focus"] = focus.save(cmap.focus, folder / "focus.png")
     mask, inner, t_seen = None, None, t_view
     if lay.outline is not None:  # show the frame volume as the viewer will see it
         from . import shapes
@@ -599,8 +630,11 @@ def make(job: Job) -> Result:
         lit = render.colour(with_frame(cmap.real, inner, cmap.plan.real), mask)
         lit_by = "room light" if job.front_lit else "lit from behind"
         ideal = with_frame(cmap.ideal, inner, cmap.plan.ideal)
+        shown = ("photo", render._u8(photo))
+        if cmap.subject is not None:
+            shown = ("photo, subject outlined", render.outlined(shown[1], cmap.subject))
         panels = [
-            ("photo", render._u8(photo)),
+            shown,
             (f"ideal colours (simulated, {lit_by})", render.colour(ideal, mask)),
             (f"suggested filaments (simulated, {lit_by})", lit),
             ("filament changes", render.palette_strip(cmap.plan, job.setup.layer)),
@@ -650,6 +684,7 @@ def make(job: Job) -> Result:
 
 
 PATHS = {"back": "from light to dark", "front": "from the first filament to the last"}
+SUBJECT_WORSE = 1.0  # Delta E: a note when the subject is this much further than the picture
 
 
 def colour_notes(job: Job, plan) -> list[str]:
@@ -672,6 +707,15 @@ def colour_notes(job: Job, plan) -> list[str]:
         notes.append(
             f"the plan uses {used} of the {job.colors} filaments: the search found no "
             "place for more that brings the print closer to the photo"
+        )
+    if plan.real.focus_de is not None and plan.real.focus_de > plan.real.mean_de + SUBJECT_WORSE:
+        tries = ["a lower --focus-floor"]
+        if used == job.colors and job.colors < MAX_COLORS:  # one more may find a place
+            tries.insert(0, f"--colors {job.colors + 1}")
+        notes.append(
+            f"even with --focus the subject is further from the photo (mean Delta E "
+            f"{plan.real.focus_de:.1f}) than the whole picture ({plan.real.mean_de:.1f}): its "
+            f"colours do not lie on the path of the others; try {' or '.join(tries)}"
         )
     if job.setup.material != "petg" and job.filaments is None:
         notes.append(
@@ -742,13 +786,14 @@ def with_frame(sim: np.ndarray, inner: np.ndarray | None, fit) -> np.ndarray:
 
 
 OUTPUTS = [f"{{s}}{part}.{ext}" for part in ("", "-*") for ext in ("stl", "3mf", "gcode", "bgcode")]
-OUTPUTS += ["preview.png", "plan.json", "report.md"]
+OUTPUTS += ["preview.png", "plan.json", "report.md", "focus.png"]
 
 
 def clear_outputs(folder: Path, stem: str, keep: Path | None = None) -> None:
     """Remove the files an earlier run wrote under this name (only the kinds we write, and
     never `keep`, the photo). Above all its G-code: a run without --slice would leave G-code
-    with other filaments and change heights next to the new project and report."""
+    with other filaments and change heights next to the new project and report. Every file
+    here is an output: a focus map to edit goes next to the photo (report.md says so)."""
     keep = keep.resolve() if keep else None
     for pattern in OUTPUTS:
         for path in folder.glob(pattern.format(s=glob.escape(stem))):
@@ -822,6 +867,7 @@ def colour_plan(res: Result) -> dict | None:
             ],
             "mean_delta_e": round(f.mean_de, 2),
             "p95_delta_e": round(f.p95_de, 2),
+            "subject_delta_e": None if f.focus_de is None else round(f.focus_de, 2),
         }
 
     return {
@@ -858,6 +904,7 @@ def write_plan(job: Job, res: Result) -> None:
         "color_range_mm": list(job.color_range) if job.mode == "color" else None,
         "min_patch_mm2": job.min_patch if job.mode == "color" else None,
         "min_patch_points": res.speck_points if job.mode == "color" else None,
+        "focus": focus_plan(job, res),
         "light": job.light,
         "tone": asdict(job.tone),
         "printer": {
@@ -888,6 +935,18 @@ def write_plan(job: Job, res: Result) -> None:
     res.files["report"].write_text(report(job, res), encoding="utf-8")
 
 
+def focus_plan(job: Job, res: Result) -> dict | None:
+    """The --focus part of plan.json."""
+    if job.focus is None or res.subject_share is None:
+        return None
+    return {
+        "spec": job.focus,
+        "floor": job.focus_floor,
+        "map": "focus.png",
+        "subject_share": round(res.subject_share, 4),
+    }
+
+
 def colour_report(job: Job, res: Result) -> list[str]:
     p = res.colour
     first = p.real.filaments[0]
@@ -906,6 +965,7 @@ def colour_report(job: Job, res: Result) -> list[str]:
             f"the photo (95 % of it within {p.real.p95_de:.0f}); the ideal colours, fitted to "
             f"the photo alone, give {p.ideal.mean_de:.1f}."
         ),
+        *focus_lines(job, res),
         speck_line(job, res),
         "",
         "## Ideal colours",
@@ -913,7 +973,9 @@ def colour_report(job: Job, res: Result) -> list[str]:
         (
             "The colours that suit this photo best, whatever filaments exist, and the closest "
             "filament to each. The print above uses the filaments that bring the whole "
-            "picture closest to the photo, which can differ from the closest colours."
+            "picture closest to the photo"
+            + (", the subject first" if job.focus is not None else "")
+            + ", which can differ from the closest colours."
         ),
         "",
         "| # | Ideal colour | Ideal TD (mm) | Closest filament | Delta E |",
@@ -940,6 +1002,26 @@ def colour_report(job: Job, res: Result) -> list[str]:
         "",
     ]
     return lines
+
+
+def focus_lines(job: Job, res: Result) -> list[str]:
+    p = res.colour
+    if p.real.focus_de is None:
+        return []
+    ideal = "" if p.ideal.focus_de is None else f" (the ideal colours: {p.ideal.focus_de:.1f})"
+    return [
+        (
+            f"- On the subject (`--focus {job.focus}`, {res.subject_share:.0%} of the "
+            f"picture) the print is a mean Delta E {p.real.focus_de:.1f} away from the "
+            f"photo{ideal}. The colours and the change heights serve the subject first, so "
+            "the rest of the picture can be further from the photo."
+        ),
+        (
+            "- `focus.png` shows the focus map (white = the subject). To refine it, copy it "
+            f"next to the photo, edit the copy and pass it with `--focus`: every run "
+            f"rewrites `{job.folder}`."
+        ),
+    ]
 
 
 def speck_line(job: Job, res: Result) -> str:

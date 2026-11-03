@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 import trimesh
 from PIL import Image
-from test_palette import sunset
+from test_palette import disc_photo, sunset
 
-from lithophane_forge import forge, image, palette, threemf
+from lithophane_forge import forge, image, palette, render, threemf
 from lithophane_forge.forge import Job
 from lithophane_forge.image import Tone
 
@@ -351,3 +351,116 @@ def test_min_patch_is_checked(setup, petg, tmp_path, value):
     j = Job(photo=tmp_path / "x", setup=setup, optics=petg, mode="color", min_patch=value)
     with pytest.raises(ValueError, match="--min-patch"):
         j.check()
+
+
+def focus_job(tmp_path, setup, petg, **kw):
+    rgb, _ = disc_photo()
+    path = tmp_path / "disc.png"
+    Image.fromarray((rgb * 255).astype(np.uint8)).save(path)
+    kw = {"colors": 3, "width": 40, "pitch": 0.5, "light": "front", "out": tmp_path / "out"} | kw
+    return Job(photo=path, setup=setup, optics=petg, mode="color", **kw)
+
+
+def test_focus_make(setup, petg, tmp_path, no_slicer):
+    """--focus writes focus.png, the subject's Delta E and the outline; focus.png passed
+    back gives the same plan, and a run without --focus removes it."""
+    j = focus_job(tmp_path, setup, petg, focus="70,15,30,30")  # a box around the disc
+    res = forge.make(j)
+    path = j.folder / "focus.png"
+    assert res.files["focus"] == path and path.is_file()
+    with Image.open(path) as im:
+        assert im.size == (120, 90) and im.mode == "L"  # the photo's size: it is small
+    plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
+    assert plan["focus"]["spec"] == "70,15,30,30" and plan["focus"]["floor"] == 0.1
+    assert 0.05 < plan["focus"]["subject_share"] < 0.12
+    assert plan["colour"]["print"]["subject_delta_e"] is not None
+    report = res.files["report"].read_text(encoding="utf-8")
+    assert "On the subject (`--focus 70,15,30,30`" in report
+    assert (
+        f"copy it next to the photo, edit the copy and pass it with `--focus`: every run rewrites `{j.folder}`"
+        in " ".join(report.split())
+    )
+    with Image.open(res.files["preview"]) as im:
+        assert (np.asarray(im.convert("RGB")) == render.FOCUS).all(axis=2).any()
+
+    again = forge.make(replace(j, focus=str(path)))
+    assert path.is_file()  # read first, then written again: the same map
+    plan2 = json.loads(again.files["plan"].read_text(encoding="utf-8"))
+    assert plan2["colour"] == plan["colour"] and plan2["colour_changes"] == plan["colour_changes"]
+
+    plain = forge.make(replace(j, focus=None))
+    assert not path.exists() and "focus" not in plain.files
+    plan3 = json.loads(plain.files["plan"].read_text(encoding="utf-8"))
+    assert plan3["focus"] is None and plan3["colour"]["print"]["subject_delta_e"] is None
+
+
+def test_focus_on_a_black_mask_is_an_error(setup, petg, tmp_path, no_slicer):
+    Image.new("L", (40, 30), 0).save(tmp_path / "black.png")
+    j = focus_job(tmp_path, setup, petg, focus=str(tmp_path / "black.png"))
+    with pytest.raises(ValueError, match="marks no part of the picture"):
+        forge.make(j)
+
+
+def test_focus_outside_the_picture_is_an_error(setup, petg, tmp_path, no_slicer):
+    """A box in the photo that the crop leaves out marks nothing in the picture."""
+    j = focus_job(tmp_path, setup, petg, focus="0,0,20,20", crop=(40, 0, 80, 90))
+    with pytest.raises(ValueError, match="marks no part of the picture"):
+        forge.make(j)
+
+
+@pytest.mark.parametrize(
+    "kw, message",
+    [
+        ({"mode": "mono"}, "--focus is for colour prints"),
+        ({"focus": "1,2,3"}, "X,Y,W,H"),
+        ({"focus_floor": 0}, "--focus-floor must be between"),
+        ({"focus_floor": 1.5}, "--focus-floor must be between"),
+    ],
+)
+def test_focus_is_checked(setup, petg, tmp_path, kw, message):
+    kw = {"mode": "color", "focus": "centre"} | kw
+    with pytest.raises(ValueError, match=message):
+        Job(photo=tmp_path / "x", setup=setup, optics=petg, **kw).check()
+
+
+def test_clear_outputs_removes_the_focus_map(tmp_path):
+    for name in ("p.stl", "focus.png", "plan.json"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    forge.clear_outputs(tmp_path, "p", keep=tmp_path / "plan.json")
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["plan.json"]
+
+
+def test_a_shaped_frame_hides_no_subject(setup, petg, tmp_path):
+    """Where the frame of a shaped panel hides the picture there is no subject: no weight
+    for the fit, no outline in the preview."""
+    j = focus_job(tmp_path, setup, petg, shape="shaped", mask="heart", focus="0,0,120,90")
+    photo = image.load(j.photo)
+    lay = forge.layout(j, photo.shape[1] / photo.shape[0])
+    cmap = forge.colour_map(j, photo, lay)
+    in_v, in_u, _ = forge.picture_cells(j, lay)
+    seen = forge.visible_points(j, lay)[np.ix_(in_v, in_u)]
+    assert cmap.subject.any() and not cmap.subject[~seen].any()
+    assert cmap.subject_share == 1.0  # the box covers the whole photo: all you see
+
+
+@pytest.mark.parametrize(
+    "worse, colors, note, more",
+    [(0.5, 2, False, False), (2.0, 2, True, False), (2.0, 1, True, True), (2.0, 8, True, False)],
+)
+def test_a_subject_far_from_the_photo_is_a_note(setup, petg, tmp_path, worse, colors, note, more):
+    """The note asks for one more filament only when the plan used all it could have and
+    --colors can grow."""
+    from types import SimpleNamespace
+
+    h = palette.heights(*forge.COLOR_RANGE, setup.first_layer, setup.layer)
+    black = next(f for f in palette.load_filaments() if f.name.endswith("Jet Black"))
+    fit = palette.Fit([black] * min(colors, 1), np.array([0.0]), h, np.zeros((len(h), 3)))
+    if colors == 8:
+        fit = replace(fit, filaments=[black] * 8, starts=np.arange(8.0))
+    fit = replace(fit, mean_de=8.0, focus_de=8.0 + worse)
+    plan = SimpleNamespace(real=fit, available=10)
+    j = Job(photo=tmp_path / "x", setup=setup, optics=petg, mode="color", colors=colors)
+    notes = [n for n in forge.colour_notes(j, plan) if "even with --focus" in n]
+    assert bool(notes) == note
+    assert any(f"--colors {colors + 1}" in n for n in notes) == more
+    assert all("--focus-floor" in n for n in notes)

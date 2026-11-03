@@ -12,6 +12,7 @@ examples:
   lithophane-forge analyze photo.jpg --colors 4
   lithophane-forge make photo.jpg --width 120 --slice
   lithophane-forge make photo.jpg --colors 5 --width 150
+  lithophane-forge make photo.jpg --width 120 --focus centre
   lithophane-forge make photo.jpg --light back --width 120
   lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
   lithophane-forge make photo.jpg --mode mono --width 120
@@ -68,6 +69,15 @@ def _levels(text: str) -> tuple[float, float]:
     return lo, hi
 
 
+FOCUS_HELP = (
+    "the subject, which gets the colours first: a mask image (white = the subject, black "
+    "or transparent = the rest; stretched to the photo), X,Y,W,H in photo pixels, or centre"
+)
+FLOOR_HELP = (
+    "with --focus: the weight of the rest of the picture against 1 for the subject, 0.01 "
+    "to 1 (default {:g}; lower favours a small subject more)"
+)
+
 LIGHT_HELP = (
     "colour mode: front (the default) for a picture you look at in room light, from the "
     "top; back for a lithophane, lit from behind"
@@ -85,6 +95,7 @@ class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 
 
 def parser() -> argparse.ArgumentParser:
+    from .focus import FLOOR
     from .forge import LIGHTS, MIN_PATCH, MODES, SHAPES, VIEWS
     from .printers import DEFAULT_MATERIAL, DEFAULT_PRINTER, MATERIALS, PRINTERS
 
@@ -121,6 +132,8 @@ def parser() -> argparse.ArgumentParser:
         "--allow-unmeasured", action="store_true", help=UNMEASURED_HELP + " (with --colors)"
     )
     a.add_argument("--light", choices=LIGHTS, help=LIGHT_HELP + " (with --colors)")
+    a.add_argument("--focus", help=FOCUS_HELP + " (with --colors)")
+    a.add_argument("--focus-floor", type=_number(float, 0.01, 1), help=FLOOR_HELP.format(FLOOR))
 
     m = sub.add_parser(
         "make",
@@ -254,6 +267,8 @@ def parser() -> argparse.ArgumentParser:
         help="smallest island or hole in a layer, in mm²: smaller ones print as blobs and "
         f"are merged into the area around them (default {MIN_PATCH:g}; 0 keeps them)",
     )
+    col.add_argument("--focus", help=FOCUS_HELP + "; the map goes to focus.png")
+    col.add_argument("--focus-floor", type=_number(float, 0.01, 1), help=FLOOR_HELP.format(FLOOR))
     prn = m.add_argument_group("printer")
     prn.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
     prn.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
@@ -281,8 +296,25 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def focus_option(args: argparse.Namespace):
+    """--focus and --focus-floor (make and analyze), checked: the parsed --focus, or None."""
+    from . import focus
+
+    if args.focus_floor is not None and args.focus is None:
+        raise UsageError("--focus-floor goes with --focus")
+    if args.focus is None:
+        return None
+    try:
+        spec = focus.parse(args.focus)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+    if spec.kind == "mask" and not spec.path.is_file():
+        raise UsageError(f"no such focus mask: {spec.path}")
+    return spec
+
+
 def job_from(args: argparse.Namespace):
-    from . import image, optics, printers
+    from . import focus, image, optics, printers
     from .forge import COLOR_RANGE, MIN_PATCH, Job
 
     try:
@@ -296,16 +328,13 @@ def job_from(args: argparse.Namespace):
         mode = args.mode or ("color" if args.shape in ("flat", "shaped") else "mono")
         mono = mode == "mono"
         light = args.light or ("back" if mono else "front")
+        why_mono = "--mode mono" if args.mode == "mono" else f"--shape {args.shape} (always mono)"
         if mono and args.min_patch is not None:
-            why = "--mode mono" if args.mode == "mono" else f"--shape {args.shape} (always mono)"
-            raise ValueError(f"--min-patch is for colour prints, not {why}")
+            raise ValueError(f"--min-patch is for colour prints, not {why_mono}")
+        if mono and args.focus is not None:
+            raise ValueError(f"--focus is for colour prints, not {why_mono}")
         if args.allow_unmeasured and (mono or light != "front"):
-            if not mono:
-                why = "--light back"
-            elif args.mode == "mono":
-                why = "--mode mono"
-            else:
-                why = f"--shape {args.shape} (always mono)"
+            why = why_mono if mono else "--light back"
             raise ValueError(f"--allow-unmeasured is for colour pictures in room light, not {why}")
         if not mono and args.td is not None:
             raise ValueError(
@@ -322,6 +351,7 @@ def job_from(args: argparse.Namespace):
         raise UsageError(f"no such photo: {args.photo}")
     if args.filaments and not args.filaments.is_file():
         raise UsageError(f"no such filament list: {args.filaments}")
+    focus_option(args)
     tone = image.Tone(levels=args.levels, gamma=args.gamma, clahe=args.clahe, invert=args.invert)
     lo, hi = COLOR_RANGE
     color_range = (args.t_min or lo, args.t_max or hi)
@@ -340,6 +370,8 @@ def job_from(args: argparse.Namespace):
         color_range=color_range,
         light=light,
         min_patch=MIN_PATCH if args.min_patch is None else args.min_patch,
+        focus=args.focus,
+        focus_floor=focus.FLOOR if args.focus_floor is None else args.focus_floor,
         width=args.width,
         height=args.height,
         arc=args.arc,
@@ -394,21 +426,28 @@ def cmd_make(args) -> int:
     return 0
 
 
+def _on_subject(fit) -> str:
+    return "" if fit.focus_de is None else f", on the subject {fit.focus_de:.1f}"
+
+
 def print_colour(plan, changes) -> None:
     print(
         "ideal colours, from the bed up:",
         ", ".join(f"{f.hex} (TD {f.td:g})" for f in plan.ideal.filaments),
-        f"-> mean Delta E {plan.ideal.mean_de:.1f}",
+        f"-> mean Delta E {plan.ideal.mean_de:.1f}{_on_subject(plan.ideal)}",
     )
     print(f"suggested filaments ({plan.source}):")
     print(f"  start with {plan.real.filaments[0].name} {plan.real.filaments[0].hex}")
     for (z, _), f in zip(changes, plan.real.filaments[1:]):
         print(f"  M600 at Z {z:.2f} mm: {f.name} {f.hex}")
-    print(f"  -> mean Delta E {plan.real.mean_de:.1f}, 95 % within {plan.real.p95_de:.0f}")
+    print(
+        f"  -> mean Delta E {plan.real.mean_de:.1f}, 95 % within {plan.real.p95_de:.0f}"
+        + _on_subject(plan.real)
+    )
 
 
 def cmd_analyze(args) -> int:
-    from . import image
+    from . import focus, image
 
     colour = args.mode == "color"
     if not colour and (args.colors or args.light):
@@ -421,10 +460,13 @@ def cmd_analyze(args) -> int:
         raise UsageError(
             "--allow-unmeasured is for colour pictures in room light, not --light back"
         )
+    if (args.focus is not None or args.focus_floor is not None) and not args.colors:
+        raise UsageError("--focus and --focus-floor are for the colour plan: add --colors N")
     if not args.photo.is_file():
         raise UsageError(f"no such photo: {args.photo}")
     if args.filaments and not args.filaments.is_file():
         raise UsageError(f"no such filament list: {args.filaments}")
+    spec = focus_option(args)
     try:
         rgb = image.load(args.photo)
     except ValueError as e:
@@ -443,21 +485,30 @@ def cmd_analyze(args) -> int:
         print(f"- {note}")
     if args.colors:
         from . import palette, printers
-        from .forge import COLOR_RANGE
+        from .forge import COLOR_RANGE, MAX_COLORS
 
-        if not 2 <= args.colors <= 8:
-            raise UsageError("--colors must be between 2 and 8")
+        if not 2 <= args.colors <= MAX_COLORS:
+            raise UsageError(f"--colors must be between 2 and {MAX_COLORS}")
         s = printers.setup()
         small = image.resize(rgb, 240, max(1, round(240 * rgb.shape[1] / rgb.shape[0])))
         h = palette.heights(*COLOR_RANGE, s.first_layer, s.layer)
         light = args.light or "front"
+        weight, floor = None, args.focus_floor or focus.FLOOR
         try:
             choices, source = palette.choices(
                 args.filaments, args.allow_abrasive, light, args.allow_unmeasured
             )
+            if spec is not None:  # the whole photo, as `small` shows it (and `centre` too)
+                size = (rgb.shape[1], rgb.shape[0])
+                values = focus.photo_map(spec, size, (0, 0, *size))
+                weight = focus.on_grid(values, size, (0, 0, *size), *small.shape[:2])
+                focus.check_subject(weight >= focus.SUBJECT, args.focus)
+                if note := focus.mask_note(spec, size):
+                    print(f"- {note}")
         except ValueError as e:
             raise UsageError(str(e)) from None
-        plan = palette.plan(palette.target(small), args.colors, h, choices, source, light)
+        target = palette.target(small)
+        plan = palette.plan(target, args.colors, h, choices, source, light, weight, floor)
         n = len(plan.real.filaments)
         lit = "light from the front" if light == "front" else "light from behind"
         print(

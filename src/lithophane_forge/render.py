@@ -71,6 +71,23 @@ def sheet(panels: list[tuple[str, Image.Image]], path: Path, box: int = 420) -> 
     return path
 
 
+FOCUS = (255, 0, 170)  # the outline of the subject (--focus) on the photo
+
+
+def outlined(im: Image.Image, subject: np.ndarray, box: int = 420) -> Image.Image:
+    """The photo at the size of a preview panel, with the outline of the subject (a bool
+    map of the picture, of any size: it is stretched to the photo)."""
+    from scipy import ndimage
+
+    pic = _fit(im, box).convert("RGB")
+    m = Image.fromarray(subject.astype(np.uint8) * 255).resize(pic.size, Image.BILINEAR)
+    inside = np.asarray(m) >= 128
+    edge = inside & ~ndimage.binary_erosion(inside, iterations=2, border_value=1)
+    out = np.asarray(pic).copy()
+    out[edge] = FOCUS
+    return Image.fromarray(out)
+
+
 def thumbnail(im: Image.Image, size: int = 256) -> bytes:
     """A square PNG for the 3MF (PrusaSlicer shows it in its file dialogs)."""
     pic = _fit(im, size)
