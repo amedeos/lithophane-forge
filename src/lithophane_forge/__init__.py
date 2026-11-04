@@ -15,6 +15,7 @@ examples:
   lithophane-forge make photo.jpg --colors 5 --width 150
   lithophane-forge make photo.jpg --width 120 --focus centre
   lithophane-forge make photo.jpg --width 120 --focus subject
+  lithophane-forge make photo.jpg --width 120 --focus centre --min-patch-subject 1
   lithophane-forge make photo.jpg --light back --width 120
   lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
   lithophane-forge make photo.jpg --mode mono --width 120
@@ -105,7 +106,16 @@ class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 
 def parser() -> argparse.ArgumentParser:
     from .focus import DEVICES, FLOOR
-    from .forge import LIGHTS, MIN_PATCH, MODES, SHAPES, VIEWS
+    from .forge import (
+        LIGHTS,
+        MAX_SMOOTH,
+        MIN_PATCH,
+        MIN_PATCH_SUBJECT,
+        MODES,
+        SHAPES,
+        SMOOTH_BACKGROUND,
+        VIEWS,
+    )
     from .printers import DEFAULT_MATERIAL, DEFAULT_PRINTER, MATERIALS, PRINTERS
 
     p = argparse.ArgumentParser(
@@ -279,6 +289,19 @@ def parser() -> argparse.ArgumentParser:
     )
     col.add_argument("--focus", help=FOCUS_HELP + "; the map goes to focus.png")
     col.add_argument("--focus-floor", type=_number(float, 0.01, 1), help=FLOOR_HELP.format(FLOOR))
+    col.add_argument(
+        "--min-patch-subject",
+        type=_number(float, 0),
+        help="with --focus: the smallest island or hole on the subject, in mm², at most "
+        f"--min-patch (default {MIN_PATCH_SUBJECT:g}, or --min-patch when that is smaller); "
+        "the subject also keeps details down to 0.4 mm wide",
+    )
+    col.add_argument(
+        "--smooth-background",
+        type=_number(float, 0, MAX_SMOOTH),
+        help="with --focus: how much the rest of the picture is smoothed before the heights "
+        f"are chosen, in mm (default {SMOOTH_BACKGROUND:g}; 0 turns it off): fewer specks",
+    )
     col.add_argument("--device", choices=DEVICES, help=DEVICE_HELP)
     prn = m.add_argument_group("printer")
     prn.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
@@ -338,7 +361,7 @@ def focus_option(args: argparse.Namespace):
 
 def job_from(args: argparse.Namespace):
     from . import focus, image, optics, printers
-    from .forge import COLOR_RANGE, MIN_PATCH, Job
+    from .forge import COLOR_RANGE, MIN_PATCH, SMOOTH_BACKGROUND, Job
 
     try:
         setup = printers.setup(
@@ -356,6 +379,13 @@ def job_from(args: argparse.Namespace):
             raise ValueError(f"--min-patch is for colour prints, not {why_mono}")
         if mono and args.focus is not None:
             raise ValueError(f"--focus is for colour prints, not {why_mono}")
+        for name in ("min_patch_subject", "smooth_background"):
+            option = "--" + name.replace("_", "-")
+            if getattr(args, name) is not None:
+                if mono:
+                    raise ValueError(f"{option} is for colour prints, not {why_mono}")
+                if args.focus is None:
+                    raise ValueError(f"{option} goes with --focus")
         if args.allow_unmeasured and (mono or light != "front"):
             why = why_mono if mono else "--light back"
             raise ValueError(f"--allow-unmeasured is for colour pictures in room light, not {why}")
@@ -393,6 +423,10 @@ def job_from(args: argparse.Namespace):
         color_range=color_range,
         light=light,
         min_patch=MIN_PATCH if args.min_patch is None else args.min_patch,
+        min_patch_subject=args.min_patch_subject,
+        smooth_background=(
+            SMOOTH_BACKGROUND if args.smooth_background is None else args.smooth_background
+        ),
         focus=args.focus,
         focus_floor=focus.FLOOR if args.focus_floor is None else args.focus_floor,
         device=args.device or "auto",
