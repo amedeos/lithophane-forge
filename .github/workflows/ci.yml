@@ -51,6 +51,30 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest -m "not slicer"
 
+  vision:
+    # Best effort: --focus subject with ONNX Runtime and the real models (about 380 MB,
+    # cached between runs by the hash of their table)
+    name: vision (ONNX Runtime and the models, best effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    env:
+      LITHOPHANE_FORGE_MODELS: ${{ github.workspace }}/.models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.24"  # the uv that wrote uv.lock (and the uv_build pin)
+          python-version: "3.14"
+          enable-cache: true
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: models-${{ hashFiles('src/lithophane_forge/data/models.toml') }}
+      - run: uv sync --locked --extra vision
+      - run: uv run lithophane-forge models --download
+      - run: uv run pytest -m vision -v
+
   slice:
     # Best effort: PrusaSlicer for Linux ships only as a Flatpak, which is big and slow to
     # install on a runner. The real slicing checks also run locally (uv run pytest).

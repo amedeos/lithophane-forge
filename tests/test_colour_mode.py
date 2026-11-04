@@ -415,12 +415,55 @@ def test_focus_outside_the_picture_is_an_error(setup, petg, tmp_path, no_slicer)
         ({"focus": "1,2,3"}, "X,Y,W,H"),
         ({"focus_floor": 0}, "--focus-floor must be between"),
         ({"focus_floor": 1.5}, "--focus-floor must be between"),
+        ({"device": "tpu"}, "--device must be one of auto, cpu, gpu"),
+        ({"device": "cpu"}, "--device goes with --focus subject"),
+        ({"focus": None, "device": "gpu"}, "--device goes with --focus subject"),
     ],
 )
 def test_focus_is_checked(setup, petg, tmp_path, kw, message):
     kw = {"mode": "color", "focus": "centre"} | kw
     with pytest.raises(ValueError, match=message):
         Job(photo=tmp_path / "x", setup=setup, optics=petg, **kw).check()
+
+
+def test_focus_subject_make(setup, petg, tmp_path, no_slicer, fake_subject):
+    """--focus subject: the models' map goes to focus.png, plan.json and report.md say
+    what found it; focus.png passed back gives the same plan without the models."""
+    j = focus_job(tmp_path, setup, petg, focus="subject", device="cpu")
+    res = forge.make(j)
+    assert fake_subject == ["cpu"] and res.found.device == "CPU"
+    plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
+    models = ["u2net_human_seg", "modnet", "isnet"]
+    assert plan["focus"]["found"] == {"models": models, "device": "CPU"}
+    assert 0.2 < plan["focus"]["subject_share"] < 0.5
+    report = " ".join(res.files["report"].read_text(encoding="utf-8").split())
+    assert "found by 3 models (u2net_human_seg, modnet, isnet) on the CPU in 0.2 s" in report
+    assert "On the subject (`--focus subject`" in report
+
+    again = forge.make(replace(j, focus=str(res.files["focus"]), device="auto"))
+    assert fake_subject == ["cpu"]  # the map was read, the models did not run
+    plan2 = json.loads(again.files["plan"].read_text(encoding="utf-8"))
+    assert plan2["colour"] == plan["colour"] and plan2["focus"]["found"] is None
+
+
+def test_focus_subject_found_nothing(setup, petg, tmp_path, monkeypatch, fake_subject):
+    from lithophane_forge import vision
+
+    def nothing(photo, size, device="auto"):
+        return np.zeros(size[::-1]), vision.Run(("u2net_human_seg",), "CPU", 0.1)
+
+    monkeypatch.setattr(vision, "subject_map", nothing)
+    with pytest.raises(ValueError, match="--focus subject found no subject"):
+        forge.make(focus_job(tmp_path, setup, petg, focus="subject"))
+
+
+def test_focus_subject_needs_the_extra(setup, petg, tmp_path, monkeypatch):
+    """Job.check refuses --focus subject without ONNX Runtime, before any download."""
+    from lithophane_forge import vision
+
+    monkeypatch.setattr(vision, "available", lambda: False)
+    with pytest.raises(ValueError, match="needs ONNX Runtime: uv sync --extra vision"):
+        focus_job(tmp_path, setup, petg, focus="subject").check()
 
 
 def test_clear_outputs_removes_the_focus_map(tmp_path):

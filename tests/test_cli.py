@@ -34,9 +34,13 @@ def test_there_are_examples():
 
 @pytest.mark.parametrize("argv", commands(), ids=lambda a: " ".join(a[1:]))
 def test_examples_parse(argv, monkeypatch, tmp_path, photo):
-    """The documented commands parse and reach their handler (the work itself is skipped)."""
+    """The documented commands parse and reach their handler (the work itself is skipped).
+    They assume the vision extra (--focus subject)."""
+    from lithophane_forge import vision
+
+    monkeypatch.setattr(vision, "available", lambda: True)
     calls = []
-    for name in ("cmd_make", "cmd_analyze", "cmd_calibrate", "cmd_printers"):
+    for name in ("cmd_make", "cmd_analyze", "cmd_calibrate", "cmd_printers", "cmd_models"):
         monkeypatch.setattr(lithophane_forge, name, lambda a, n=name: calls.append(n) or 0)
     args = [str(photo) if a.endswith((".jpg", ".png")) else a for a in argv[1:]]
     assert main(args) == 0
@@ -109,6 +113,8 @@ def test_analyze(photo, capsys):
         (["--colors", "2", "--focus", "nothing.png"], "no such focus mask"),
         (["--colors", "2", "--focus", "1,2,3"], "X,Y,W,H"),
         (["--colors", "2", "--focus", "999,999,5,5"], "outside the photo"),
+        (["--colors", "2", "--device", "cpu"], "--device goes with --focus subject"),
+        (["--colors", "2", "--focus", "centre", "--device", "gpu"], "goes with --focus subject"),
     ],
 )
 def test_analyze_options_that_do_nothing_are_errors(photo, capsys, argv, message):
@@ -155,6 +161,9 @@ def test_help_shows_no_none_defaults(capsys):
         (["make", "{photo}", "--focus", "missing.png"], "no such focus mask"),
         (["make", "{photo}", "--focus", "1,2,3"], "X,Y,W,H"),
         (["make", "{photo}", "--focus", "500,500,10,10"], "outside the photo"),
+        (["make", "{photo}", "--mode", "mono", "--focus", "subject"], "not --mode mono"),
+        (["make", "{photo}", "--device", "gpu"], "--device goes with --focus subject"),
+        (["make", "{photo}", "--focus", "centre", "--device", "cpu"], "goes with --focus subject"),
     ],
 )
 def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
@@ -173,6 +182,7 @@ def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
         ["--width", "inf"],
         ["--focus", "centre", "--focus-floor", "0"],
         ["--focus", "centre", "--focus-floor", "1.5"],
+        ["--focus", "subject", "--device", "tpu"],
     ],
 )
 def test_bad_option_exits_with_2(argv):
@@ -248,6 +258,53 @@ def test_focus_reaches_the_job(photo):
     job = job_from(parser().parse_args(args))
     assert job.focus == str(photo) and job.focus_floor == 0.05
     assert job_from(parser().parse_args(["make", str(photo)])).focus is None
+
+
+def test_subject_needs_the_extra(photo, capsys, monkeypatch, tmp_path):
+    from lithophane_forge import vision
+
+    monkeypatch.setattr(vision, "available", lambda: False)
+    for argv in (
+        ["make", str(photo), "-o", str(tmp_path)],
+        ["analyze", str(photo), "--colors", "2"],
+    ):
+        assert main([*argv, "--focus", "subject"]) == 2
+        assert "needs ONNX Runtime: uv sync --extra vision" in capsys.readouterr().err
+
+
+def test_device_reaches_the_job(photo, fake_subject):
+    from lithophane_forge import job_from, parser
+
+    argv = ["make", str(photo), "--focus", "subject"]
+    assert job_from(parser().parse_args([*argv, "--device", "cpu"])).device == "cpu"
+    assert job_from(parser().parse_args(argv)).device == "auto"
+
+
+def test_analyze_finds_the_subject(photo, capsys, fake_subject):
+    argv = ["analyze", str(photo), "--colors", "2", "--focus", "subject", "--device", "cpu"]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "was found by u2net_human_seg, modnet, isnet on the CPU in 0.2 s" in out
+    assert out.count("on the subject") == 2 and fake_subject == ["cpu"]
+
+
+def test_models_command(capsys, monkeypatch, tmp_path):
+    from lithophane_forge import vision
+
+    monkeypatch.setenv(vision.FOLDER_ENV, str(tmp_path))
+    monkeypatch.setattr(vision, "available", lambda: False)
+    assert main(["models"]) == 0
+    out = capsys.readouterr().out
+    assert f"model folder: {tmp_path} ($LITHOPHANE_FORGE_MODELS)" in out
+    assert "ONNX Runtime: not installed (uv sync --extra vision" in out
+    assert out.count(" missing ") == 3 and "--download fetches them" in out
+
+    def offline(model, path):
+        raise ValueError(f"cannot download {model.url}")
+
+    monkeypatch.setattr(vision, "fetch", offline)
+    assert main(["models", "--download"]) == 1
+    assert capsys.readouterr().err.count("cannot download") == 3
 
 
 def test_analyze_with_focus(photo, capsys):

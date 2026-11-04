@@ -7,16 +7,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .image import linear_to_srgb
+from .image import linear_to_srgb, to_pil
 from .optics import Optics
 
 LED = np.array([1.0, 0.93, 0.82])  # a warm white LED behind the panel
 BACKGROUND = (236, 234, 240)
 INK = (40, 40, 48)
-
-
-def _u8(rgb: np.ndarray) -> Image.Image:
-    return Image.fromarray((np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8))
 
 
 def _masked(rgb: np.ndarray, mask) -> np.ndarray:
@@ -30,7 +26,7 @@ def backlit(thickness: np.ndarray, optics: Optics, light=LED, mask=None) -> Imag
     `mask`: where the panel is (shaped panels); the rest shows the background."""
     lum = optics.light(thickness)  # 1 at t_min
     rgb = linear_to_srgb(lum[..., None] * np.asarray(light)[None, None, :])
-    return _u8(_masked(rgb, mask))
+    return to_pil(_masked(rgb, mask))
 
 
 def relief(thickness: np.ndarray, pitch: float, mask=None) -> Image.Image:
@@ -42,7 +38,7 @@ def relief(thickness: np.ndarray, pitch: float, mask=None) -> Image.Image:
     sun /= np.linalg.norm(sun)
     shade = np.clip(normal @ sun, 0, 1)
     base = 0.25 + 0.75 * shade
-    return _u8(_masked(np.dstack([base * 0.95, base * 0.95, base]), mask))
+    return to_pil(_masked(np.dstack([base * 0.95, base * 0.95, base]), mask))
 
 
 def _fit(im: Image.Image, box: int) -> Image.Image:
@@ -100,7 +96,7 @@ def thumbnail(im: Image.Image, size: int = 256) -> bytes:
 
 def colour(lin: np.ndarray, mask=None) -> Image.Image:
     """A simulated colour print (linear RGB per grid point, as the viewer sees it)."""
-    return _u8(_masked(linear_to_srgb(np.clip(lin, 0, 1)), mask))
+    return to_pil(_masked(linear_to_srgb(np.clip(lin, 0, 1)), mask))
 
 
 def palette_strip(plan, layer: float, width: int = 260, row: int = 56) -> Image.Image:

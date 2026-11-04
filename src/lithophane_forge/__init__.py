@@ -2,6 +2,7 @@
 
 import argparse
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ examples:
   lithophane-forge make photo.jpg --width 120 --slice
   lithophane-forge make photo.jpg --colors 5 --width 150
   lithophane-forge make photo.jpg --width 120 --focus centre
+  lithophane-forge make photo.jpg --width 120 --focus subject
   lithophane-forge make photo.jpg --light back --width 120
   lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
   lithophane-forge make photo.jpg --mode mono --width 120
@@ -21,6 +23,7 @@ examples:
   lithophane-forge make photo.jpg --printer coreone --slice
   lithophane-forge calibrate --slice
   lithophane-forge printers
+  lithophane-forge models --download
 
 make prints in colour, lying on the bed, with filament changes (M600): a picture you
 look at in room light, from the top. --light back makes a colour lithophane (light
@@ -71,7 +74,13 @@ def _levels(text: str) -> tuple[float, float]:
 
 FOCUS_HELP = (
     "the subject, which gets the colours first: a mask image (white = the subject, black "
-    "or transparent = the rest; stretched to the photo), X,Y,W,H in photo pixels, or centre"
+    "or transparent = the rest; stretched to the photo), X,Y,W,H in photo pixels, centre, or "
+    "subject (found by segmentation models: the people, or the main object; needs the "
+    "vision extra)"
+)
+DEVICE_HELP = (
+    "with --focus subject: where the models run: auto (an NVIDIA card when ONNX Runtime can "
+    "use it, else the CPU), cpu, or gpu (an error without CUDA)"
 )
 FLOOR_HELP = (
     "with --focus: the weight of the rest of the picture against 1 for the subject, 0.01 "
@@ -95,7 +104,7 @@ class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 
 
 def parser() -> argparse.ArgumentParser:
-    from .focus import FLOOR
+    from .focus import DEVICES, FLOOR
     from .forge import LIGHTS, MIN_PATCH, MODES, SHAPES, VIEWS
     from .printers import DEFAULT_MATERIAL, DEFAULT_PRINTER, MATERIALS, PRINTERS
 
@@ -134,6 +143,7 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--light", choices=LIGHTS, help=LIGHT_HELP + " (with --colors)")
     a.add_argument("--focus", help=FOCUS_HELP + " (with --colors)")
     a.add_argument("--focus-floor", type=_number(float, 0.01, 1), help=FLOOR_HELP.format(FLOOR))
+    a.add_argument("--device", choices=DEVICES, help=DEVICE_HELP)
 
     m = sub.add_parser(
         "make",
@@ -269,6 +279,7 @@ def parser() -> argparse.ArgumentParser:
     )
     col.add_argument("--focus", help=FOCUS_HELP + "; the map goes to focus.png")
     col.add_argument("--focus-floor", type=_number(float, 0.01, 1), help=FLOOR_HELP.format(FLOOR))
+    col.add_argument("--device", choices=DEVICES, help=DEVICE_HELP)
     prn = m.add_argument_group("printer")
     prn.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
     prn.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
@@ -293,23 +304,35 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("-o", "--out", type=Path, default=Path("out"), help="output folder")
 
     sub.add_parser("printers", help="list the printers and check their presets")
+    md = sub.add_parser(
+        "models", help="list the models of --focus subject, and where ONNX Runtime runs them"
+    )
+    md.add_argument("--download", action="store_true", help="download the missing models")
     return p
 
 
 def focus_option(args: argparse.Namespace):
-    """--focus and --focus-floor (make and analyze), checked: the parsed --focus, or None."""
+    """--focus, --focus-floor and --device (make and analyze), checked: the parsed --focus,
+    or None."""
     from . import focus
 
     if args.focus_floor is not None and args.focus is None:
         raise UsageError("--focus-floor goes with --focus")
-    if args.focus is None:
-        return None
     try:
-        spec = focus.parse(args.focus)
+        spec = None if args.focus is None else focus.parse(args.focus)
     except ValueError as e:
         raise UsageError(str(e)) from None
+    if args.device is not None and (spec is None or spec.kind != "subject"):
+        raise UsageError("--device goes with --focus subject")
+    if spec is None:
+        return None
     if spec.kind == "mask" and not spec.path.is_file():
         raise UsageError(f"no such focus mask: {spec.path}")
+    if spec.kind == "subject":
+        from . import vision
+
+        if not vision.available():
+            raise UsageError(vision.NEEDS)
     return spec
 
 
@@ -372,6 +395,7 @@ def job_from(args: argparse.Namespace):
         min_patch=MIN_PATCH if args.min_patch is None else args.min_patch,
         focus=args.focus,
         focus_floor=focus.FLOOR if args.focus_floor is None else args.focus_floor,
+        device=args.device or "auto",
         width=args.width,
         height=args.height,
         arc=args.arc,
@@ -500,11 +524,17 @@ def cmd_analyze(args) -> int:
             )
             if spec is not None:  # the whole photo, as `small` shows it (and `centre` too)
                 size = (rgb.shape[1], rgb.shape[0])
-                values = focus.photo_map(spec, size, (0, 0, *size))
+                values, found = focus.build(spec, rgb, (0, 0, *size), args.device or "auto")
                 weight = focus.on_grid(values, size, (0, 0, *size), *small.shape[:2])
                 focus.check_subject(weight >= focus.SUBJECT, args.focus)
                 if note := focus.mask_note(spec, size):
                     print(f"- {note}")
+                if found is not None:
+                    print(
+                        f"- the subject ({(values >= focus.SUBJECT).mean():.0%} of the photo) "
+                        f"was found by {', '.join(found.models)} on the {found.device} in "
+                        f"{found.seconds:.1f} s"
+                    )
         except ValueError as e:
             raise UsageError(str(e)) from None
         target = palette.target(small)
@@ -574,6 +604,40 @@ def cmd_printers(args) -> int:
     return 1 if problems else 0
 
 
+def cmd_models(args) -> int:
+    from . import vision
+
+    where = vision.folder()
+    env = f" (${vision.FOLDER_ENV})" if os.environ.get(vision.FOLDER_ENV) else ""
+    print(f"model folder: {where}{env}")
+    if not vision.available():
+        print(f"ONNX Runtime: not installed ({vision.EXTRA}, or {vision.GPU_EXTRA})")
+    else:
+        try:
+            version, providers = vision.runtime()
+        except ValueError as e:  # installed, but it does not load
+            print(f"ONNX Runtime: {e}")
+        else:
+            auto = "CUDA, if it loads" if vision.CUDA in providers else "the CPU"
+            print(f"ONNX Runtime {version}: {', '.join(providers)}; --device auto uses {auto}")
+    problems = 0
+    for m in vision.models().values():
+        state = vision.state(m)
+        if args.download and state != "ok":
+            try:
+                vision.fetch(m, where / m.file)  # it also replaces a damaged file
+                state = "ok"  # fetch checked the hash
+            except ValueError as e:
+                print(f"lithophane-forge: error: {e}", file=sys.stderr)
+        problems += state != "ok"
+        print(f"{m.name:16s} {m.size / 1e6:4.0f} MB  {state:8s} {m.title}; {m.licence}")
+    if problems and not args.download:
+        print(
+            "missing models download on first use; --download fetches them (and damaged ones) now"
+        )
+    return 1 if problems and args.download else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     handler = {
@@ -581,6 +645,7 @@ def main(argv: list[str] | None = None) -> int:
         "analyze": cmd_analyze,
         "calibrate": cmd_calibrate,
         "printers": cmd_printers,
+        "models": cmd_models,
     }[args.command]
     try:
         return handler(args)

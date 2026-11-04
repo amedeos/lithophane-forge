@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from . import focus, image, mesh, profiles, render, slicer, threemf
+from .focus import DEVICES
 from .focus import FLOOR as FOCUS_FLOOR
 from .image import Tone
 from .optics import Optics
@@ -48,8 +49,9 @@ class Job:
     color_range: tuple[float, float] = COLOR_RANGE
     light: str = "back"  # colour mode: "front" for a picture you look at in room light
     min_patch: float = MIN_PATCH  # colour mode: see remove_specks (0: off)
-    focus: str | None = None  # colour mode: the subject (a mask image, X,Y,W,H or centre)
+    focus: str | None = None  # colour mode: the subject (a mask, X,Y,W,H, centre or subject)
     focus_floor: float = FOCUS_FLOOR  # the weight of the rest of the picture (focus.py)
+    device: str = "auto"  # --focus subject: where the models run (vision.py)
     width: float | None = None  # outer size in mm, frame included
     height: float | None = None
     arc: float = 120.0  # degrees, for shape="curved"
@@ -157,6 +159,16 @@ class Job:
             focus.parse(self.focus)  # a box that is not X,Y,W,H
             if not focus.MIN_FLOOR <= self.focus_floor <= 1:
                 raise ValueError(f"--focus-floor must be between {focus.MIN_FLOOR:g} and 1")
+        if self.device not in DEVICES:
+            raise ValueError(f"--device must be one of {', '.join(DEVICES)}")
+        found = self.focus is not None and focus.parse(self.focus).kind == "subject"
+        if self.device != "auto" and not found:
+            raise ValueError("--device goes with --focus subject")
+        if found:
+            from . import vision
+
+            if not vision.available():
+                raise ValueError(vision.NEEDS)
         if self.hole and self.shape not in ("flat", "shaped"):
             raise ValueError("--hole works with the flat and shaped panels")
         if self.stand and self.shape != "flat":
@@ -211,6 +223,7 @@ class Result:
     colour_changes: list[tuple[float, str]] = field(default_factory=list)
     speck_points: int = 0  # colour mode: grid points of the smallest patch a layer keeps
     subject_share: float | None = None  # with --focus: the share of the picture it marks
+    found: object = None  # with --focus subject: what found it (vision.Run)
 
 
 def grid(
@@ -309,6 +322,7 @@ class ColourMap:
     focus: np.ndarray | None = None  # with --focus: the map in photo space (focus.png)
     subject: np.ndarray | None = None  # the picture's grid points that are the subject
     subject_share: float | None = None  # their share of the points you see
+    found: object = None  # with --focus subject: what found it (vision.Run)
 
 
 def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
@@ -328,11 +342,11 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     target = palette.target(image.resize(photo, ri, ci), job.tone.levels, job.tone.gamma)
     box = np.ix_(in_v, in_u)
     seen = visible_points(job, lay)
-    values = weight = subject = share = None
+    values = weight = subject = share = found = None
     notes = []
     if job.focus is not None:
         spec = focus.parse(job.focus)
-        values = focus.photo_map(spec, size, win)
+        values, found = focus.build(spec, rgb, win, job.device)
         # no subject where a shaped panel's frame hides the picture: those points keep the
         # weight of the rest, as they have without --focus
         weight = np.where(seen[box], focus.on_grid(values, size, win, ri, ci), 0.0)
@@ -384,7 +398,7 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
             f"filament, {real.filaments[-1].name}: it shows {where}{why}"
         )
     sims = sim(ideal, ideal_idx), sim(real, real_idx)
-    return ColourMap(plan, t, *sims, photo, points, notes, values, subject, share)
+    return ColourMap(plan, t, *sims, photo, points, notes, values, subject, share, found)
 
 
 def visible_points(job: Job, lay: Layout) -> np.ndarray:
@@ -587,6 +601,7 @@ def make(job: Job) -> Result:
         res.colour_changes = cmap.plan.real.colour_changes(job.setup.layer)
         res.speck_points = cmap.speck_points
         res.subject_share = cmap.subject_share
+        res.found = cmap.found
         res.notes += colour_notes(job, cmap.plan) + cmap.notes
     else:
         t_view, photo = thickness_map(job, rgb, lay)
@@ -622,7 +637,7 @@ def make(job: Job) -> Result:
         lit = render.backlit(t_seen, job.optics, mask=mask)
         unrolled = ", unrolled" if job.shape == "cylinder" else ""
         panels = [
-            ("photo", render._u8(photo)),
+            ("photo", image.to_pil(photo)),
             ("lit from behind (simulated)" + unrolled, lit),
             relief_panel(job, t_seen, lay.pitch, mask),
         ]
@@ -630,7 +645,7 @@ def make(job: Job) -> Result:
         lit = render.colour(with_frame(cmap.real, inner, cmap.plan.real), mask)
         lit_by = "room light" if job.front_lit else "lit from behind"
         ideal = with_frame(cmap.ideal, inner, cmap.plan.ideal)
-        shown = ("photo", render._u8(photo))
+        shown = ("photo", image.to_pil(photo))
         if cmap.subject is not None:
             shown = ("photo, subject outlined", render.outlined(shown[1], cmap.subject))
         panels = [
@@ -944,6 +959,9 @@ def focus_plan(job: Job, res: Result) -> dict | None:
         "floor": job.focus_floor,
         "map": "focus.png",
         "subject_share": round(res.subject_share, 4),
+        "found": None
+        if res.found is None
+        else {"models": list(res.found.models), "device": res.found.device},
     }
 
 
@@ -1009,7 +1027,17 @@ def focus_lines(job: Job, res: Result) -> list[str]:
     if p.real.focus_de is None:
         return []
     ideal = "" if p.ideal.focus_de is None else f" (the ideal colours: {p.ideal.focus_de:.1f})"
-    return [
+    found = []
+    if res.found is not None:
+        found = [
+            (
+                f"- The subject was found by {len(res.found.models)} models "
+                f"({', '.join(res.found.models)}) on the {res.found.device} in "
+                f"{res.found.seconds:.1f} s: the people when the photo has people, else its "
+                "main object. Check its outline in `preview.png`."
+            )
+        ]
+    return found + [
         (
             f"- On the subject (`--focus {job.focus}`, {res.subject_share:.0%} of the "
             f"picture) the print is a mean Delta E {p.real.focus_de:.1f} away from the "
