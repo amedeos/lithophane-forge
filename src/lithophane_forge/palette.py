@@ -905,3 +905,32 @@ def target(rgb: np.ndarray, levels=(0.5, 99.5), gamma: float = 1.0) -> np.ndarra
     stretched = np.clip((lstar - lo) / max(hi - lo, 1e-6), 0, 1)
     new_y = lstar_to_y(stretched * 100) ** gamma
     return lab(lin * (new_y / y)[..., None])
+
+
+SMOOTH_DE = 10.0  # smooth_background: the colour distance (Delta E) the filter averages over
+LAB_SHIFT = np.array([0.0, 128.0, 128.0])  # CIELAB to positive values for the bilateral filter
+LAB_SCALE = 256.0  # and to 0..1: one scale on every channel, so a distance stays a distance
+
+
+def smooth_background(target_lab: np.ndarray, weight: np.ndarray, sigma: float) -> np.ndarray:
+    """The target with the background smoothed, for the choice of heights (assign) only: a
+    bilateral filter in CIELAB, which keeps edges and evens out texture such as grass and
+    clouds (it would print as specks), with a spatial sigma of `sigma` grid points and a
+    colour sigma of SMOOTH_DE. It is blended by 1 - `weight` (the focus map on the grid),
+    so the subject keeps the photo. The Delta E is still measured against the photo itself
+    (score). A `sigma` of 0: off.
+
+    scikit-image divides the colour distance by the number of channels before it weighs
+    it, so its sigma_color is SMOOTH_DE / 3 here. It also needs values that are not
+    negative: with negative ones it shifts the image, but it builds its table of weights
+    for the old range (checked with scikit-image 0.26), so the shift is ours."""
+    if sigma <= 0:
+        return target_lab
+    from skimage.restoration import denoise_bilateral
+
+    scaled = (target_lab + LAB_SHIFT) / LAB_SCALE
+    smooth = denoise_bilateral(
+        scaled, sigma_color=SMOOTH_DE / 3 / LAB_SCALE, sigma_spatial=sigma, channel_axis=-1
+    )
+    w = np.asarray(weight, dtype=float)[..., None]
+    return w * target_lab + (1 - w) * (smooth * LAB_SCALE - LAB_SHIFT)

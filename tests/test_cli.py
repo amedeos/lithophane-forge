@@ -164,6 +164,14 @@ def test_help_shows_no_none_defaults(capsys):
         (["make", "{photo}", "--mode", "mono", "--focus", "subject"], "not --mode mono"),
         (["make", "{photo}", "--device", "gpu"], "--device goes with --focus subject"),
         (["make", "{photo}", "--focus", "centre", "--device", "cpu"], "goes with --focus subject"),
+        (["make", "{photo}", "--min-patch-subject", "1"], "--min-patch-subject goes with --focus"),
+        (["make", "{photo}", "--focus", "centre", "--min-patch-subject", "2"], "raise --min-patch"),
+        (["make", "{photo}", "--smooth-background", "1"], "--smooth-background goes with --focus"),
+        (["make", "{photo}", "--mode", "mono", "--min-patch-subject", "1"], "not --mode mono"),
+        (
+            ["make", "{photo}", "--shape", "curved", "--smooth-background", "0"],
+            "curved (always mono)",
+        ),
     ],
 )
 def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
@@ -183,6 +191,9 @@ def test_errors_exit_with_2(argv, message, photo, capsys, no_slicer, tmp_path):
         ["--focus", "centre", "--focus-floor", "0"],
         ["--focus", "centre", "--focus-floor", "1.5"],
         ["--focus", "subject", "--device", "tpu"],
+        ["--focus", "centre", "--min-patch-subject", "-1"],
+        ["--focus", "centre", "--smooth-background", "nan"],
+        ["--focus", "centre", "--smooth-background", "3"],
     ],
 )
 def test_bad_option_exits_with_2(argv):
@@ -247,6 +258,25 @@ def test_calibrate_errors_exit_with_2(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(calibrate, "make", fail)
     assert main(["calibrate", "-o", str(tmp_path)]) == 2
     assert "other presets" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("option", ["--min-patch-subject", "--smooth-background"])
+def test_analyze_has_no_focus_region_options(photo, option):
+    """analyze shows the plan before the heights are smoothed: the options are make's."""
+    with pytest.raises(SystemExit) as e:
+        main(["analyze", str(photo), "--colors", "3", "--focus", "centre", option, "1"])
+    assert e.value.code == 2
+
+
+def test_focus_regions_reach_the_job(photo):
+    from lithophane_forge import forge, job_from, parser
+
+    job = job_from(parser().parse_args(["make", str(photo), "--focus", "centre"]))
+    assert job.min_patch_subject is None and job.subject_patch == forge.MIN_PATCH_SUBJECT
+    assert job.smooth_background == forge.SMOOTH_BACKGROUND
+    argv = ["--focus", "centre", "--min-patch-subject", "0.3", "--smooth-background", "0"]
+    job = job_from(parser().parse_args(["make", str(photo), *argv]))
+    assert (job.min_patch_subject, job.smooth_background) == (0.3, 0)
 
 
 def test_focus_reaches_the_job(photo):

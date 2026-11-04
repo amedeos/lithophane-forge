@@ -224,16 +224,20 @@ def test_colour_frame_is_the_whole_stack(setup, petg, tmp_path):
     assert not j.standing
 
 
-def small_parts(idx, cells):
+def small_parts(idx, cells, outside=None):
     """Islands (points at least z high) and holes (points lower than z) smaller than
-    `cells` points, over every layer z of a height map."""
+    `cells` points, over every layer z of a height map; with `outside` (a bool per point),
+    only those that touch no point of it."""
     from scipy import ndimage
 
     count = 0
     for z in range(int(idx.min()) + 1, int(idx.max()) + 1):
         for part in (idx >= z, idx < z):
-            labels, _ = ndimage.label(part)
-            count += int((np.bincount(labels.ravel())[1:] < cells).sum())
+            labels, n = ndimage.label(part)
+            small = np.bincount(labels.ravel(), minlength=n + 1) < cells
+            if outside is not None:
+                small &= np.bincount(labels[outside], minlength=n + 1) == 0
+            count += int(small[1:].sum())
     return count
 
 
@@ -284,6 +288,79 @@ def test_remove_specks_in_one_pass():
     assert np.array_equal(forge.remove_specks(out, 9), out)
 
 
+def test_smooth_heights_keeps_fine_detail_on_the_subject():
+    """With --focus the subject keeps the small spots and the corners that the 3 x 3 median
+    removes, but no part narrower than the width: a nozzle line cannot draw it."""
+    from scipy.ndimage import median_filter
+
+    raw = np.zeros((30, 40), dtype=np.int64)
+    subject = np.zeros_like(raw, dtype=bool)
+    subject[:, :20] = True
+    for c in (3, 23):  # the same parts on the subject and outside it
+        raw[3:5, c : c + 2] = 4  # a spot of 2 x 2 points
+        raw[10:22, c] = 3  # a line one point wide
+        raw[10:22, c + 5 : c + 7] = 2  # a line two points wide
+    assert np.array_equal(forge.smooth_heights(raw), median_filter(raw, size=3))
+    out = forge.smooth_heights(raw, subject, 2)
+    assert (out[3:5, 3:5] == 4).all() and (out[3:5, 23:25] == 0).all()  # the spot
+    assert (out[10:22, 3] == 0).all() and (out[10:22, 23] == 0).all()  # one point wide: gone
+    assert (out[10:22, 8:10] == 2).all()  # two points wide, with its corners
+    assert (out[10, 28:30] == 0).all() and (out[11:21, 28:30] == 2).all()  # median: no corners
+    assert np.array_equal(out[:, 20:], median_filter(raw, size=3)[:, 20:])
+    fine = forge.smooth_heights(raw, subject, 1)  # a coarse grid: one point is wide enough
+    assert np.array_equal(fine[subject], raw[subject])
+
+
+def test_remove_specks_keeps_smaller_patches_on_the_subject():
+    idx = np.zeros((30, 40), dtype=np.int64)
+    subject = np.zeros_like(idx, dtype=bool)
+    subject[:, :20] = True
+    idx[5:7, 5:8] = 3  # 6 points on the subject
+    idx[5:7, 25:28] = 3  # 6 points outside it
+    idx[20, 10:12] = 2  # 2 points on the subject
+    idx[15:17, 18:21] = 4  # 6 points across the edge: 4 on the subject, 2 outside it
+    out = forge.remove_specks(idx, 9, subject=subject, subject_cells=4)
+    assert (out[5:7, 5:8] == 3).all() and (out[5:7, 25:28] == 0).all()
+    assert (out[20, 10:12] == 0).all()
+    assert (out[15:17, 18:21] == 4).all()  # it touches the subject: it stays whole
+    assert small_parts(out, 4) == 0 and small_parts(out, 9, subject) == 0
+    assert small_parts(idx, 9, subject) > 0
+    plain = forge.remove_specks(idx, 9)
+    # the subject's limit is never larger than the rest's, and no subject is the old filter
+    assert np.array_equal(forge.remove_specks(idx, 9, subject=subject, subject_cells=20), plain)
+    nobody = np.zeros_like(subject)
+    assert np.array_equal(forge.remove_specks(idx, 9, subject=nobody, subject_cells=4), plain)
+
+
+def test_remove_specks_at_the_seam():
+    """A part that the large limit removes outside the subject must not leave a hole there
+    that is smaller than the large limit (the code review's case)."""
+    idx = np.full((30, 40), 3, dtype=np.int64)
+    subject = np.zeros_like(idx, dtype=bool)
+    subject[:, :20] = True
+    idx[:, :20] = 0  # the subject is low
+    idx[10:15, 19] = 3  # an island of 5 points on the subject, at its edge
+    idx[10:15, 20:24] = 0  # a low patch of 20 points just outside, next to the island
+    out = forge.remove_specks(idx, 25, subject=subject, subject_cells=5)
+    assert (out[10:15, 19] == 3).all() and (out[10:15, 20:24] == 3).all()
+    assert small_parts(out, 5) == 0 and small_parts(out, 25, subject) == 0
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_remove_specks_on_a_random_subject(seed):
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, 8, (60, 80))
+    subject = np.zeros_like(idx, dtype=bool)
+    subject[10:40, 15:50] = True
+    out = forge.remove_specks(idx, 16, subject=subject, subject_cells=5)
+    assert small_parts(out, 5) == 0 and small_parts(out, 16, subject) == 0
+    assert np.array_equal(forge.remove_specks(out, 16, subject=subject, subject_cells=5), out)
+    # with no point of the subject marked it is scikit-image's filter
+    nobody = np.zeros_like(subject)
+    plain = forge.remove_specks(idx, 16)
+    assert np.array_equal(forge.remove_specks(idx, 16, subject=nobody, subject_cells=5), plain)
+
+
 def noisy_job(tmp_path, setup, petg, **kw):
     rng = np.random.default_rng(1)
     rgb = np.clip(sunset(100, 80) + rng.normal(0, 0.08, (100, 80, 3)), 0, 1)
@@ -330,6 +407,71 @@ def test_a_last_filament_lost_to_smoothing_is_a_note(setup, petg, tmp_path, monk
     )
 
 
+def heights_of(cmap, j, lay):
+    """The height index of every grid point, from t_view (the frame included)."""
+    h = palette.heights(*j.color_range, j.setup.first_layer, j.setup.layer)
+    return np.abs(cmap.t_view[..., None] - h).argmin(-1)
+
+
+def patches(idx, where):
+    """Connected areas of one height that touch `where`."""
+    from scipy import ndimage
+
+    count = 0
+    for z in np.unique(idx[where]):
+        labels, _ = ndimage.label(idx == z)
+        count += len(np.unique(labels[where & (idx == z)]))
+    return count
+
+
+def test_focus_regions(setup, petg, tmp_path):
+    """With --focus the background is smoothed before the heights are chosen (fewer patches)
+    and the subject keeps smaller patches; the filaments and change heights do not change,
+    and the Delta E is still measured against the photo."""
+    j, photo, lay = noisy_job(tmp_path, setup, petg, light="front", focus="20,25,40,50")
+    on = forge.colour_map(j, photo, lay)
+    off = forge.colour_map(replace(j, smooth_background=0), photo, lay)
+    assert on.subject_points == round(forge.MIN_PATCH_SUBJECT / lay.pitch**2) == 16
+    assert on.subject_width == 2 and on.speck_points == 25
+    assert [f.name for f in on.plan.real.filaments] == [f.name for f in off.plan.real.filaments]
+    assert np.array_equal(on.plan.real.starts, off.plan.real.starts)
+    full_on, full_off = heights_of(on, j, lay), heights_of(off, j, lay)
+    in_v, in_u, _ = forge.picture_cells(j, lay)
+    box = np.ix_(in_v, in_u)
+    subject = np.zeros(full_on.shape, dtype=bool)
+    subject[box] = on.subject
+    rest = forge.visible_points(j, lay) & ~subject
+    assert patches(full_on, rest) < 0.7 * patches(full_off, rest)
+    changed = full_on != full_off  # blended by 1 - the map: the box keeps the photo
+    assert changed[subject].mean() < 0.2 * changed[rest].mean()
+    assert small_parts(full_on, 16) == 0 and small_parts(full_on, 25, subject) == 0
+    idx = full_on[box]
+    target = palette.target(image.resize(on.photo, *idx.shape), j.tone.levels, j.tone.gamma)
+    assert on.plan.real.mean_de == palette.score(on.plan.real, target, idx).mean_de
+
+
+def test_smooth_background():
+    """The bilateral filter keeps a strong edge, evens out small texture, and leaves the
+    subject (weight 1) as it is."""
+    rng = np.random.default_rng(0)
+    lab = np.zeros((20, 20, 3))
+    lab[..., 0] = 50 + rng.normal(0, 1, (20, 20))  # texture of about 1 Delta E
+    lab[:, 10:, 0] += 4 * palette.SMOOTH_DE  # an edge four times the colour sigma
+    rest, subject = np.zeros((20, 20)), np.ones((20, 20))
+    out = palette.smooth_background(lab, rest, 2)
+    assert out[:, :8, 0].mean() < 51 and out[:, 12:, 0].mean() > 49 + 4 * palette.SMOOTH_DE
+    assert out[:, :8, 0].std() < 0.5 * lab[:, :8, 0].std()
+    assert np.array_equal(palette.smooth_background(lab, subject, 2), lab)
+    assert palette.smooth_background(lab, rest, 0) is lab
+
+
+def test_a_last_filament_lost_with_focus_names_the_smoothing(setup, petg, tmp_path, monkeypatch):
+    j, photo, lay = noisy_job(tmp_path, setup, petg, light="front", focus="centre")
+    monkeypatch.setattr(forge, "remove_specks", lambda idx, *a, **k: np.zeros_like(idx))
+    notes = " ".join(forge.colour_map(j, photo, lay).notes)
+    assert "--min-patch 0 keeps the specks; --smooth-background 0 does not smooth" in notes
+
+
 def test_min_patch_larger_than_the_picture(setup, petg, tmp_path):
     j, photo, lay = noisy_job(tmp_path, setup, petg, min_patch=2000)
     with pytest.raises(ValueError, match="as large as the whole picture"):
@@ -353,6 +495,52 @@ def test_min_patch_is_checked(setup, petg, tmp_path, value):
         j.check()
 
 
+@pytest.mark.parametrize("name", ["min_patch_subject", "smooth_background"])
+@pytest.mark.parametrize("value", [-1, float("inf"), float("nan")])
+def test_focus_regions_are_checked(setup, petg, tmp_path, name, value):
+    kw = {"mode": "color", "focus": "centre", name: value}
+    with pytest.raises(ValueError, match="--" + name.replace("_", "-") + " must be"):
+        Job(photo=tmp_path / "x", setup=setup, optics=petg, **kw).check()
+
+
+def test_the_subject_patch(setup, petg, tmp_path):
+    """--min-patch-subject: at most --min-patch when given; when not, the default or a
+    smaller --min-patch. The bilateral filter's sigma has a ceiling (its time grows with
+    the square)."""
+    kw = {"photo": tmp_path / "x", "setup": setup, "optics": petg, "mode": "color"}
+    kw |= {"focus": "centre"}
+    assert Job(**kw).subject_patch == forge.MIN_PATCH_SUBJECT
+    assert Job(**kw, min_patch=0.5).subject_patch == 0.5
+    assert Job(**kw, min_patch_subject=1).subject_patch == 1
+    with pytest.raises(ValueError, match="larger than --min-patch 1 mm²: .* raise --min-patch"):
+        Job(**kw, min_patch_subject=2).check()
+    Job(**kw, min_patch_subject=2, min_patch=2).check()
+    with pytest.raises(ValueError, match="--smooth-background must be between 0"):
+        Job(**kw, smooth_background=forge.MAX_SMOOTH + 0.1).check()
+
+
+@pytest.mark.parametrize(
+    "kw, keeps",
+    [
+        ({}, "islands and holes from 0.64 mm² (--min-patch-subject)"),
+        ({"min_patch": 0.5}, "islands and holes from 0.5 mm² (--min-patch)"),
+        ({"min_patch_subject": 0.5}, "islands and holes from 0.5 mm² (--min-patch-subject)"),
+        ({"min_patch": 0.03}, "--min-patch 0.03 mm² is not larger than one grid point"),
+        ({"min_patch_subject": 0}, "all its islands and holes (--min-patch-subject 0)"),
+    ],
+)
+def test_the_report_names_the_subject_limit(setup, petg, tmp_path, kw, keeps):
+    j = replace(noisy_job(tmp_path, setup, petg, focus="centre")[0], **kw)
+    res = forge.Result(layout=forge.layout(j, 0.8), speck_points=25)
+    res.subject_width = 2
+    res.subject_points = round(j.subject_patch / res.layout.pitch**2)
+    lines = forge.speck_lines(j, res)
+    assert lines[0].startswith("- In the rest of the picture, ") and keeps in lines[1]
+    off = replace(j, min_patch=0)
+    res.speck_points = res.subject_points = 0
+    assert forge.speck_lines(off, res)[0].startswith("- In the rest of the picture, small")
+
+
 def focus_job(tmp_path, setup, petg, **kw):
     rgb, _ = disc_photo()
     path = tmp_path / "disc.png"
@@ -373,9 +561,18 @@ def test_focus_make(setup, petg, tmp_path, no_slicer):
     plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
     assert plan["focus"]["spec"] == "70,15,30,30" and plan["focus"]["floor"] == 0.1
     assert 0.05 < plan["focus"]["subject_share"] < 0.12
+    # a grid 0.5 mm apart: one point is wide enough, 0.64 mm² is 3 points (2.56)
+    assert plan["focus"]["subject_min_patch_mm2"] == forge.MIN_PATCH_SUBJECT
+    assert plan["focus"]["subject_min_patch_points"] == 3 and plan["min_patch_points"] == 4
+    assert plan["focus"]["subject_min_width_mm"] == 0.5
+    assert plan["focus"]["smooth_background_mm"] == forge.SMOOTH_BACKGROUND
     assert plan["colour"]["print"]["subject_delta_e"] is not None
     report = res.files["report"].read_text(encoding="utf-8")
     assert "On the subject (`--focus 70,15,30,30`" in report
+    flat = " ".join(report.split())
+    assert "In the rest of the picture, islands and holes smaller than 1 mm²" in flat
+    assert "the heights keep details from 0.5 mm wide and islands and holes from 0.64 mm²" in flat
+    assert "smoothed (0.4 mm, --smooth-background; 0 turns it off)" in flat
     assert (
         f"copy it next to the photo, edit the copy and pass it with `--focus`: every run rewrites `{j.folder}`"
         in " ".join(report.split())

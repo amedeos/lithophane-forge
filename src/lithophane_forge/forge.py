@@ -22,6 +22,10 @@ MODES = ("mono", "color")
 VIEWS = ("flat", "relief")
 COLOR_RANGE = (0.6, 3.0)  # mm: colour panels, from the thinnest stack to the frame
 MIN_PATCH = 1.0  # mm²: colour panels, the smallest island or hole a layer keeps
+MIN_PATCH_SUBJECT = 0.64  # mm²: with --focus, the same on the subject (0.8 x 0.8 mm)
+MIN_WIDTH = 0.4  # mm: with --focus, the subject keeps no detail narrower (a nozzle line)
+SMOOTH_BACKGROUND = 0.4  # mm: with --focus, the background's smoothing (palette.smooth_background)
+MAX_SMOOTH = 2.0  # mm: the bilateral filter's time grows with the square of its sigma
 MAX_COLORS = 8  # colour panels: filaments
 STANDING = {"flat", "curved", "cylinder"}  # the others print lying on the bed
 DEFAULT_WIDTH = 100.0
@@ -49,6 +53,8 @@ class Job:
     color_range: tuple[float, float] = COLOR_RANGE
     light: str = "back"  # colour mode: "front" for a picture you look at in room light
     min_patch: float = MIN_PATCH  # colour mode: see remove_specks (0: off)
+    min_patch_subject: float | None = None  # with --focus: on the subject (see subject_patch)
+    smooth_background: float = SMOOTH_BACKGROUND  # with --focus: mm (0: off)
     focus: str | None = None  # colour mode: the subject (a mask, X,Y,W,H, centre or subject)
     focus_floor: float = FOCUS_FLOOR  # the weight of the rest of the picture (focus.py)
     device: str = "auto"  # --focus subject: where the models run (vision.py)
@@ -85,6 +91,15 @@ class Job:
         if self.view is not None:
             return self.view
         return "relief" if self.light == "front" else "flat"
+
+    @property
+    def subject_patch(self) -> float:
+        """With --focus: the smallest island or hole on the subject, in mm². Given, it is
+        `min_patch_subject` (check() keeps it at most `min_patch`); else MIN_PATCH_SUBJECT,
+        or `min_patch` when that is smaller."""
+        if self.min_patch_subject is not None:
+            return self.min_patch_subject
+        return min(MIN_PATCH_SUBJECT, self.min_patch)
 
     @property
     def front_lit(self) -> bool:
@@ -153,6 +168,21 @@ class Job:
                 raise ValueError("--invert and --clahe work in mono mode only (--mode mono)")
             if not math.isfinite(self.min_patch) or self.min_patch < 0:
                 raise ValueError("--min-patch must be a number, 0 (off) or more")
+            if self.min_patch_subject is not None:
+                given = self.min_patch_subject
+                if not math.isfinite(given) or given < 0:
+                    raise ValueError("--min-patch-subject must be a number, 0 (off) or more")
+                if given > self.min_patch:
+                    raise ValueError(
+                        f"--min-patch-subject {given:g} mm² is larger than --min-patch "
+                        f"{self.min_patch:g} mm²: the subject cannot be cleaner than the rest; "
+                        "raise --min-patch too"
+                    )
+            smooth = self.smooth_background
+            if not math.isfinite(smooth) or not 0 <= smooth <= MAX_SMOOTH:
+                raise ValueError(
+                    f"--smooth-background must be between 0 (off) and {MAX_SMOOTH:g} mm"
+                )
         if self.focus is not None:
             if self.mode != "color":
                 raise ValueError("--focus is for colour prints, not --mode mono")
@@ -222,6 +252,8 @@ class Result:
     colour: object = None  # palette.Plan in colour mode
     colour_changes: list[tuple[float, str]] = field(default_factory=list)
     speck_points: int = 0  # colour mode: grid points of the smallest patch a layer keeps
+    subject_points: int = 0  # with --focus: the same on the subject
+    subject_width: int = 1  # with --focus: grid points of the narrowest detail it keeps
     subject_share: float | None = None  # with --focus: the share of the picture it marks
     found: object = None  # with --focus subject: what found it (vision.Run)
 
@@ -323,13 +355,13 @@ class ColourMap:
     subject: np.ndarray | None = None  # the picture's grid points that are the subject
     subject_share: float | None = None  # their share of the points you see
     found: object = None  # with --focus subject: what found it (vision.Run)
+    subject_points: int = 0  # with --focus: remove_specks's limit on the subject
+    subject_width: int = 1  # with --focus: the subject keeps no detail narrower (points)
 
 
 def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     """Colour mode: the filaments, the change heights and the height of every grid point."""
     from dataclasses import replace
-
-    from scipy.ndimage import median_filter
 
     from . import palette
 
@@ -343,6 +375,8 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     box = np.ix_(in_v, in_u)
     seen = visible_points(job, lay)
     values = weight = subject = share = found = None
+    near = target  # the photo the heights are chosen from
+    regions = {}  # with --focus: what remove_specks does on the subject
     notes = []
     if job.focus is not None:
         spec = focus.parse(job.focus)
@@ -360,6 +394,13 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
             f"--min-patch {job.min_patch:g} mm² is as large as the whole picture "
             f"({seen.sum() * lay.pitch**2:.0f} mm²): use a smaller value"
         )
+    width = 1
+    if subject is not None:
+        near = palette.smooth_background(target, weight, job.smooth_background / lay.pitch)
+        width = max(1, math.ceil(MIN_WIDTH / lay.pitch - 1e-9))
+        on_grid = np.zeros((lay.rows, lay.cols), dtype=bool)
+        on_grid[box] = subject
+        regions = {"subject": on_grid, "subject_cells": round(job.subject_patch / lay.pitch**2)}
     lo, hi = job.color_range
     h = palette.heights(lo, hi, job.setup.first_layer, job.setup.layer)
     choices, source = palette.choices(
@@ -369,11 +410,11 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     frame = int(np.clip(np.searchsorted(h, job.frame_thickness + 1e-9) - 1, 0, len(h) - 1))
 
     def smoothed(fit):
-        """The heights that print (a median filter, then no specks, with the frame around
+        """The heights that print (smooth_heights, then no specks, with the frame around
         the picture), and the fit with the Delta E of those heights where the picture shows."""
         full = np.full((lay.rows, lay.cols), frame)
-        full[box] = median_filter(palette.assign(target, palette.lab(fit.colours)), size=3)
-        idx = remove_specks(full, points, ~seen, frame)[box]
+        full[box] = smooth_heights(palette.assign(near, palette.lab(fit.colours)), subject, width)
+        idx = remove_specks(full, points, ~seen, frame, **regions)[box]
         inside = seen[box]
         on_subject = None if subject is None else subject[inside]
         return idx, palette.score(fit, target[inside], idx[inside], on_subject)
@@ -392,13 +433,19 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     top = np.searchsorted(real.starts, h[real_idx[seen[box]]] - 1e-6, side="right") - 1
     if len(real.filaments) > 1 and not (top == len(real.filaments) - 1).any():
         where = "only on the frame" if job.frame > 0 else "nowhere"
-        why = " (--min-patch 0 keeps the specks)" if points > 1 else ""
+        why = ["--min-patch 0 keeps the specks"] if points > 1 else []
+        if job.focus is not None and job.smooth_background > 0:
+            why.append("--smooth-background 0 does not smooth the rest of the picture")
+        why = f" ({'; '.join(why)})" if why else ""
         notes.append(
             f"once the heights are smoothed, no point of the picture reaches the last "
             f"filament, {real.filaments[-1].name}: it shows {where}{why}"
         )
     sims = sim(ideal, ideal_idx), sim(real, real_idx)
-    return ColourMap(plan, t, *sims, photo, points, notes, values, subject, share, found)
+    small = regions.get("subject_cells", 0)
+    return ColourMap(
+        plan, t, *sims, photo, points, notes, values, subject, share, found, small, width
+    )
 
 
 def visible_points(job: Job, lay: Layout) -> np.ndarray:
@@ -419,8 +466,33 @@ def inner_points(job: Job, lay: Layout) -> np.ndarray:
     return np.flipud(shapes.points_inside(lay.outline.buffer(-job.frame), *dims))
 
 
+def smooth_heights(raw: np.ndarray, subject: np.ndarray | None = None, width: int = 1):
+    """Colour mode: the best height of every point of the picture (`raw`), smoothed by a
+    3 x 3 median filter, which removes parts one point wide and rounds corners.
+
+    With a `subject` (a bool per point, from --focus) the subject keeps finer detail: there
+    a grey opening and then a grey closing with a `width` x `width` square replace the
+    median. They remove only the parts narrower than `width` points (a nozzle line cannot
+    draw them) and keep the corners and small spots that the median would remove. With a
+    `width` of 1 (a grid of 0.4 mm or more) the subject keeps `raw`."""
+    from scipy.ndimage import grey_closing, grey_opening, median_filter
+
+    out = median_filter(raw, size=3)
+    if subject is None:
+        return out
+    fine = raw
+    if width > 1:
+        fine = grey_closing(grey_opening(raw, size=(width, width)), size=(width, width))
+    return np.where(subject, fine, out)
+
+
 def remove_specks(
-    idx: np.ndarray, cells: int, hidden: np.ndarray | None = None, frame: int = 0
+    idx: np.ndarray,
+    cells: int,
+    hidden: np.ndarray | None = None,
+    frame: int = 0,
+    subject: np.ndarray | None = None,
+    subject_cells: int = 0,
 ) -> np.ndarray:
     """Colour mode: no layer of the print keeps an island or a hole smaller than `cells`
     grid points. `idx` holds a height (index) per point; a layer is the set of points at
@@ -434,17 +506,48 @@ def remove_specks(
     An area opening lowers every small island to the height around it, then an area closing
     raises every small hole. The closing only fills holes, so it joins the filled points to
     the large patch around them and makes no new island: one pass is enough. A thin line
-    that joins a large patch stays, and so does a thin ring around one."""
+    that joins a large patch stays, and so does a thin ring around one.
+
+    With a `subject` (a bool per point, from --focus) an island or a hole that touches the
+    subject needs only `subject_cells` points (never more than `cells`); one wholly outside
+    it still needs `cells`. Both filters then decide part by part (`_regional_opening`), so
+    the seam between the two regions needs no special case."""
     if hidden is not None:
         idx = np.where(hidden, frame, idx)
     if cells <= 1:
         return idx
     if cells > idx.size:  # scikit-image would return -1 everywhere
         raise ValueError(f"no patch of {cells} points fits in {idx.size} points")
-    from skimage.morphology import area_closing, area_opening
+    if subject is None:
+        from skimage.morphology import area_closing, area_opening
 
-    out = area_opening(idx, cells, connectivity=1)
-    return area_closing(out, cells, connectivity=1)
+        out = area_opening(idx, cells, connectivity=1)
+        return area_closing(out, cells, connectivity=1)
+    small = min(subject_cells, cells)
+    out = _regional_opening(idx, cells, small, subject)
+    return -_regional_opening(-out, cells, small, subject)  # the closing: holes
+
+
+def _regional_opening(idx: np.ndarray, cells: int, small: int, subject: np.ndarray):
+    """An area opening (connectivity 1) in which a part that touches the subject needs only
+    `small` points: every point keeps the highest layer whose part through it is large
+    enough. A part that is large enough at one layer is also large enough at the layer
+    below (it only grows, and it keeps touching the subject), so this is an opening like
+    scikit-image's, which gives the same result when no part touches the subject."""
+    from scipy import ndimage
+
+    lo, hi = int(idx.min()), int(idx.max())
+    out = np.full(idx.shape, lo, dtype=idx.dtype)
+    marked = np.asarray(subject, dtype=float).ravel()
+    for z in range(lo + 1, hi + 1):
+        labels, n = ndimage.label(idx >= z)
+        flat = labels.ravel()
+        size = np.bincount(flat, minlength=n + 1)
+        touches = np.bincount(flat, weights=marked, minlength=n + 1) > 0
+        keep = size >= np.where(touches, small, cells)
+        keep[0] = False
+        out[keep[labels]] = z
+    return out
 
 
 def limit_overhangs(t_view: np.ndarray, angle: float, dz: float) -> np.ndarray:
@@ -600,6 +703,7 @@ def make(job: Job) -> Result:
         res.colour = cmap.plan
         res.colour_changes = cmap.plan.real.colour_changes(job.setup.layer)
         res.speck_points = cmap.speck_points
+        res.subject_points, res.subject_width = cmap.subject_points, cmap.subject_width
         res.subject_share = cmap.subject_share
         res.found = cmap.found
         res.notes += colour_notes(job, cmap.plan) + cmap.notes
@@ -959,6 +1063,10 @@ def focus_plan(job: Job, res: Result) -> dict | None:
         "floor": job.focus_floor,
         "map": "focus.png",
         "subject_share": round(res.subject_share, 4),
+        "subject_min_patch_mm2": job.subject_patch,
+        "subject_min_patch_points": res.subject_points,
+        "subject_min_width_mm": round(res.subject_width * res.layout.pitch, 4),
+        "smooth_background_mm": job.smooth_background,
         "found": None
         if res.found is None
         else {"models": list(res.found.models), "device": res.found.device},
@@ -984,7 +1092,7 @@ def colour_report(job: Job, res: Result) -> list[str]:
             f"the photo alone, give {p.ideal.mean_de:.1f}."
         ),
         *focus_lines(job, res),
-        speck_line(job, res),
+        *speck_lines(job, res),
         "",
         "## Ideal colours",
         "",
@@ -1052,19 +1160,57 @@ def focus_lines(job: Job, res: Result) -> list[str]:
     ]
 
 
-def speck_line(job: Job, res: Result) -> str:
-    if res.speck_points > 1:
-        return (
-            f"- Islands and holes smaller than {job.min_patch:g} mm² in a layer are merged "
-            "into the area around them: they would print as blobs (--min-patch, 0 keeps them)."
+def speck_lines(job: Job, res: Result) -> list[str]:
+    """What the smoothing of the heights did: the speck filter, and with --focus what the
+    subject keeps and how the rest of the picture was smoothed."""
+    if job.focus is None:
+        return [speck_line(job, res)]
+    pitch, limit = res.layout.pitch, job.subject_patch
+    # the subject's limit comes from --min-patch when that is smaller than the default
+    given = job.min_patch_subject is not None or job.min_patch >= MIN_PATCH_SUBJECT
+    option = "--min-patch-subject" if given else "--min-patch"
+    width = f"details from {res.subject_width * pitch:.1f} mm wide"
+    if res.subject_points > 1:
+        keeps = (
+            f"{width} and islands and holes from {limit:g} mm² ({option}): check in the "
+            "print that such small patches come out clean, not as blobs."
         )
-    if job.min_patch > 0:
-        return (
-            f"- --min-patch {job.min_patch:g} mm² is not larger than one grid point "
+    elif limit > 0:
+        keeps = (
+            f"{width} and all its islands and holes: {option} {limit:g} mm² is not larger "
+            f"than one grid point ({pitch:.2f} mm apart)."
+        )
+    else:
+        keeps = f"{width} and all its islands and holes ({option} 0)."
+    lines = [speck_line(job, res, rest=True), f"- On the subject the heights keep {keeps}"]
+    if job.smooth_background > 0:
+        lines.append(
+            f"- Before the heights were chosen, the rest of the picture was smoothed "
+            f"({job.smooth_background:g} mm, --smooth-background; 0 turns it off): texture "
+            "such as grass and clouds makes fewer specks. The Delta E above is measured "
+            "against the photo itself."
+        )
+    return lines
+
+
+def speck_line(job: Job, res: Result, rest: bool = False) -> str:
+    """The speck filter in one line; `rest`: with --focus, about the rest of the picture."""
+    where = "in the rest of the picture, " if rest else ""
+    if res.speck_points > 1:
+        text = (
+            f"{where}islands and holes smaller than {job.min_patch:g} mm² in a layer are "
+            "merged into the area around them: they would print as blobs (--min-patch, 0 "
+            "keeps them)."
+        )
+    elif job.min_patch > 0:
+        text = (
+            f"{where}--min-patch {job.min_patch:g} mm² is not larger than one grid point "
             f"({res.layout.pitch:.2f} mm apart), so small islands and holes are kept: some "
             "may print as blobs."
         )
-    return "- Small islands and holes are kept (--min-patch 0): some may print as blobs."
+    else:
+        text = f"{where}small islands and holes are kept (--min-patch 0): some may print as blobs."
+    return "- " + text[0].upper() + text[1:]
 
 
 def report(job: Job, res: Result) -> str:
