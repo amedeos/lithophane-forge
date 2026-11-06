@@ -1,13 +1,13 @@
 # 🖼️ lithophane-forge
 
-Turn a photo into a colour picture or a lithophane for a Prusa printer with one extruder, with a ready-to-print PrusaSlicer project (Original Prusa MK4 and Prusament PETG by default). The tool finds the ideal colours for the photo, picks real PETG filaments for them and plans the filament changes. The panel prints lying on the bed, and the printer stops at each change so that you can load the next filament. By default the panel is a picture that you look at in room light, like a photo; `--light back` makes a colour lithophane instead, lit from behind. It also makes classic white lithophanes (`--mode mono`): flat and curved panels and lamp cylinders, printed standing. Everything runs on the command line, on the CPU, in a few seconds. You need no GPU and no neural network.
+Turn a photo into a colour picture or a lithophane for a Prusa printer with one extruder, with a ready-to-print PrusaSlicer project (Original Prusa MK4 and Prusament PETG by default). The tool finds the ideal colours for the photo, picks real PETG filaments for them and plans the filament changes. The panel prints lying on the bed, and the printer stops at each change so that you can load the next filament. By default the panel is a picture that you look at in room light, like a photo; `--light back` makes a colour lithophane instead, lit from behind. It also makes classic white lithophanes (`--mode mono`): flat and shaped panels, which also print lying, and curved panels and lamp cylinders, which print standing. Everything runs on the command line, on the CPU, in a few seconds. You need no GPU and no neural network.
 
 ## How it works
 
 - **Colour (the default).** A printer with one extruder changes colour only between layers, so the panel prints lying and every point is a stack of filaments cut at its own height. Each height shows one colour: in room light you see the top of the stack (the default), and lit from behind (`--light back`) the light crosses the whole stack. The tool finds the colours and the change heights that bring the print closest to the photo, then gives every point its height (see Colour prints).
 - **Mono (`--mode mono`).** The photo's lightness is cleaned up (levels, optional local contrast, gamma) and turned into thickness in white filament: thin is bright, thick is dark. Light through plastic falls off exponentially (Beer-Lambert).
 - numpy turns the height map into a closed mesh with a frame: a flat panel or a shaped one (heart, oval, circle, or your own outline). In mono there are also curved panels that stand on their own and cylinders for a lamp.
-- Colour and shaped panels print lying on the bed and need no support. Mono flat, curved and cylinder panels print standing, for the finest tones. Under every thick part the plastic slopes down at no more than 60° from vertical, so they print without supports.
+- Flat and shaped panels print lying on the bed, in colour and in mono, and need no support. Lying, the thickness goes up in steps of one layer (0.1 mm), so a white panel has about 29 tones. Curved panels and cylinders print standing, and so does a white flat panel with `--pose standing` (smooth tones, with a brim); under every thick part the plastic then slopes down at no more than 60° from vertical, so they print without supports.
 - build123d makes the plain parts: the frame of a shaped panel, a hanging tab, a stand for flat panels and a lamp base with a pocket for an LED.
 - The 3MF is a PrusaSlicer project: the printer, print and filament presets are the official Prusa ones, the object carries its own settings, and in colour the filament changes are already in place.
 - With `--slice` you also get the G-code (binary `.bgcode` on the MK4), ready for the printer.
@@ -30,7 +30,8 @@ uv run lithophane-forge make photo.jpg --filaments examples/filaments.toml
 uv run lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
 uv run lithophane-forge make photo.jpg --shape shaped --mask outline.svg --width 100
 uv run lithophane-forge make photo.jpg --width 120 --stand --hole
-uv run lithophane-forge make photo.jpg --mode mono --width 120 --slice    # white, standing
+uv run lithophane-forge make photo.jpg --mode mono --width 120 --slice    # white, lying
+uv run lithophane-forge make photo.jpg --mode mono --width 120 --pose standing    # white, standing
 uv run lithophane-forge make photo.jpg --mode mono --height 80 --gamma 0.8 --clahe 0.01
 uv run lithophane-forge make photo.jpg --shape curved --height 100 --arc 110    # always mono
 uv run lithophane-forge make photo.jpg --shape cylinder --diameter 80 --repeat 2 --lamp-base
@@ -111,7 +112,7 @@ uv run lithophane-forge calibrate --slice
 uv run lithophane-forge make photos/lake.jpg --mode mono --width 120 --t-min 0.8 --t-max 3.4 --td 2.1 --slice
 ```
 
-`--mode mono` makes a classic lithophane in white PETG. It prints standing with a brim, for the finest tones, and a 120 mm panel takes about 3 to 5 hours. Curved panels and cylinders are always mono. Print the calibration strip first (about 1 hour 20 minutes), read it with `out/calibration-petg/report.md`, and pass your own `--t-min`, `--t-max` and `--td`.
+`--mode mono` makes a classic lithophane in white PETG. It prints lying, like a colour panel: the thickness goes up in steps of one layer, so the picture has about 29 tones (0.8 to 3.6 mm in 0.1 mm layers), and in smooth areas such as a sky the steps can show as faint contour lines. A 120 × 158 mm panel takes about 6 hours (PrusaSlicer's estimate). `--pose standing` prints a flat panel standing with a brim instead, with smooth tones (the same panel: about 8 hours 25 minutes). Curved panels and cylinders are always mono and always stand. Print the calibration strip first, in the pose you will print (`calibrate`, about 1 hour lying; `calibrate --pose standing` for standing panels), read it with its `report.md`, and pass your own `--t-min`, `--t-max` and `--td`.
 
 ## Output
 
@@ -130,23 +131,24 @@ Put the photos you want to try in `photos/`: git ignores everything in it, so yo
 
 ## Options
 
-- **Mode:** colour by default for flat and shaped panels: filament changes, printed lying. `--mode mono` makes a white lithophane printed standing; curved panels and cylinders are always mono.
+- **Mode:** colour by default for flat and shaped panels: filament changes, printed lying. `--mode mono` makes a white lithophane; curved panels and cylinders are always mono.
+- **Pose:** flat and shaped panels print lying (the default). `--pose standing` prints a white flat panel standing, with a brim and smooth tones; `--max-overhang` (60° from vertical by default) sets the steepest ledge of a standing panel. Curved panels and cylinders always stand.
 - **Light (colour):** `--light front` (the default) plans a picture that you look at in room light, from the top. `--light back` plans a colour lithophane, lit from behind. Mono prints are always lithophanes.
 - **Size and shape:** `--width` and `--height` are the outer size in mm, frame included; give one and the photo sets the other, or both to crop the photo. `--frame` sets the frame width (0 for none) and `--frame-t` its thickness; a shaped panel's frame must reach the top of the picture, or its stepped edge shows.
 - **Curved (mono):** `--shape curved` bends the panel on an arc of `--arc` degrees, 10 to 300 (the width is the arc length on the outside).
 - **Cylinder (mono):** `--shape cylinder --diameter D --height H` (the height is 1.25 × the diameter if you leave it out). The picture goes once around; a normal photo then loses its top and bottom, so `--repeat 2` puts it around twice (the tool suggests the best number). `--lamp-base` adds a base with a pocket for an LED tealight or puck light (`--led-diameter`, `--led-height`) and a notch for a cable.
 - **Shaped:** `--shape shaped --mask heart|oval|circle`, or `--mask` with an SVG file (its largest closed shape) or a PNG file (dark pixels are the shape). An oval takes the photo's proportions, a circle stays round. The frame follows the outline.
 - **Extras:** `--hole` adds a hanging tab with a 5 mm hole (flat and shaped panels); `--stand` makes a stand with a slot for a flat panel.
-- **Colour:** `--colors N` (2 to 8 filaments, 4 by default), `--filaments FILE` for your own list, `--t-min`/`--t-max` for the height range of the stack (0.6 to 3.0 mm by default), `--allow-abrasive` to also use filaments that need a hardened steel nozzle, `--allow-unmeasured` to also use translucent filaments without measured `k` and `s` in room light, `--min-patch` for the smallest island or hole a layer keeps (1 mm² by default, 0 keeps them all), `--focus MASK|X,Y,W,H|centre|subject` for the subject that gets the colours first, `--focus-floor` for the weight of the rest of the picture (0.1 by default), `--min-patch-subject` for the smallest island or hole on the subject (0.64 mm² by default), `--smooth-background` for how much the rest of the picture is smoothed (0.4 mm by default, 0 turns it off), and `--device auto|cpu|gpu` for where the models of `--focus subject` run. See below.
+- **Colour:** `--colors N` (2 to 8 filaments, 4 by default), `--filaments FILE` for your own list, `--t-min`/`--t-max` for the height range of the stack (0.6 to 3.0 mm by default), `--allow-abrasive` to also use filaments that need a hardened steel nozzle, `--allow-unmeasured` to also use translucent filaments without measured `k` and `s` in room light, `--min-patch` for the smallest island or hole a layer keeps (1 mm² by default in colour, 0.2 mm² in mono; 0 keeps them all), `--focus MASK|X,Y,W,H|centre|subject` for the subject that gets the colours first, `--focus-floor` for the weight of the rest of the picture (0.1 by default), `--min-patch-subject` for the smallest island or hole on the subject (0.64 mm² by default), `--smooth-background` for how much the rest of the picture is smoothed (0.4 mm by default, 0 turns it off), and `--device auto|cpu|gpu` for where the models of `--focus subject` run. See below.
 - **Picture:** `--crop X,Y,W,H` (photo pixels; the panel takes the crop's shape unless you give both sizes), `--levels LOW,HIGH` (percentiles that become black and white), `--gamma`, `--clahe` (local contrast, mono only), `--invert` (a negative in lightness, mono only), `--view` (the face that looks at you: the relief, which is the default with light from the front and the only choice, or the flat face, the default for lithophanes).
-- **Thickness (mono):** `--t-min`, `--t-max` and `--td` (mm of your filament that let 10 % of the light through). The defaults for white PETG (0.8, 3.6 and 2.3 mm) are estimates: calibrate your spool for the best result. In colour, `--t-min` and `--t-max` set the height range of the stack, and `--td` is an error: the filaments' own TD values count.
+- **Thickness (mono):** `--t-min`, `--t-max` and `--td` (mm of your filament that let 10 % of the light through). The defaults for white PETG (0.8, 3.6 and 2.3 mm) are estimates: calibrate your spool for the best result. Lying, every point goes to the layer whose light is closest to its own, and `--min-patch` (0.2 mm² by default in mono, about one nozzle line) removes the islands and holes that the noise of the photo leaves in each layer and that a nozzle line cannot draw; `--min-patch 0` keeps every detail but prints slower. In colour, `--t-min` and `--t-max` set the height range of the stack, and `--td` is an error: the filaments' own TD values count.
 - **Printer:** `--printer` (`mk4`, `mk4s`, `mk3.5`, `mk3s`, `coreone`, `coreonel`, `xl`, `mini`), `--material petg|pla`, or your own presets with `--printer-preset`, `--print-preset` and `--filament-preset`.
 - **Detail:** `--pitch` (mm between grid points, 0.2 by default; a 0.4 mm nozzle gains nothing below that) and `--max-triangles`.
 
 ## Printing
 
 - Colour panels (the default) and shaped panels print lying, flat face down. A picture for room light (the default) shows its top face; a lithophane shows the face on the bed by default, so a smooth or satin sheet gives the cleanest result. `report.md` says which filament to load first and at which height to change it.
-- Mono panels use white filament and print standing with a brim. PETG lets more light through than PLA, so its thickness range is wider.
+- Mono panels use white filament. Flat and shaped ones print lying, flat face down; by default that face looks at you, so a smooth or satin sheet gives the cleanest result. Curved panels, cylinders and `--pose standing` panels print standing with a brim. PETG lets more light through than PLA, so its thickness range is wider.
 - On the MK4, print PETG on the textured sheet, or use a release agent on the smooth sheet, and keep the filament dry.
 - Print the stand and the lamp base in any opaque colour; they use 0.2 mm layers.
 - Light a lithophane from behind with a diffuse, neutral white LED (about 4000 K). By default its flat face looks at you.
@@ -171,7 +173,7 @@ A printer with one extruder changes colour only between layers: the printer stop
 uv run lithophane-forge calibrate --slice
 ```
 
-For mono prints. The strip has twelve steps from 0.6 to 5 mm, printed standing like a lithophane, with each thickness written in thin plastic under its step (it glows when lit). Hold it against your light: the first step that looks black is `--t-max`, about 0.55 × that is `--td`, and the thinnest even step is `--t-min`. `report.md` explains it again next to the files.
+For mono prints. The strip has twelve steps from 0.6 to 5 mm, printed like a flat lithophane: lying by default, standing with `--pose standing` (the light crosses lying and standing plastic differently, so measure the pose you print). Each thickness is written in thin plastic under its step (it glows when lit). Hold it against your light: the first step that looks black is `--t-max`, about 0.55 × that is `--td`, and the thinnest even step is `--t-min`. `report.md` explains it again next to the files.
 
 ## Development
 
