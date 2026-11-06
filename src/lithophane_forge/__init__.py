@@ -19,6 +19,7 @@ examples:
   lithophane-forge make photo.jpg --light back --width 120
   lithophane-forge make photo.jpg --shape shaped --mask heart --width 90 --hole
   lithophane-forge make photo.jpg --mode mono --width 120
+  lithophane-forge make photo.jpg --mode mono --width 120 --pose standing
   lithophane-forge make photo.jpg --shape curved --height 100 --arc 110
   lithophane-forge make photo.jpg --shape cylinder --diameter 80 --repeat 2 --lamp-base
   lithophane-forge make photo.jpg --printer coreone --slice
@@ -28,8 +29,8 @@ examples:
 
 make prints in colour, lying on the bed, with filament changes (M600): a picture you
 look at in room light, from the top. --light back makes a colour lithophane (light
-behind it); --mode mono prints white filament standing. Curved panels and cylinders
-always print mono.
+behind it); --mode mono prints white filament, also lying (--pose standing for a flat
+panel). Curved panels and cylinders always print mono, standing.
 """
 
 
@@ -108,10 +109,13 @@ def parser() -> argparse.ArgumentParser:
     from .focus import DEVICES, FLOOR
     from .forge import (
         LIGHTS,
+        MAX_OVERHANG,
         MAX_SMOOTH,
         MIN_PATCH,
+        MIN_PATCH_MONO,
         MIN_PATCH_SUBJECT,
         MODES,
+        POSES,
         SHAPES,
         SMOOTH_BACKGROUND,
         VIEWS,
@@ -166,9 +170,15 @@ def parser() -> argparse.ArgumentParser:
     size.add_argument(
         "--mode",
         choices=MODES,
-        help="color (the default for flat and shaped panels): filament changes (M600), "
-        "printed lying; mono: white filament, printed standing (always for curved and "
-        "cylinder)",
+        help="color (the default for flat and shaped panels): filament changes (M600); "
+        "mono: white filament (always for curved and cylinder)",
+    )
+    size.add_argument(
+        "--pose",
+        choices=POSES,
+        help="lying on the bed (the default for flat and shaped panels: the thickness goes "
+        "in steps of one layer) or standing (mono flat panels: smooth tones, with a brim; "
+        "curved panels and cylinders always stand)",
     )
     size.add_argument(
         "--width",
@@ -214,8 +224,8 @@ def parser() -> argparse.ArgumentParser:
     size.add_argument(
         "--max-overhang",
         type=_number(float, 30),
-        default=60.0,
-        help="steepest ledge on the relief side, degrees from vertical (90: off)",
+        help="standing: steepest ledge on the relief side, degrees from vertical (default "
+        f"{MAX_OVERHANG:g}; 90: off)",
     )
     look = m.add_argument_group("picture and thickness")
     look.add_argument("--crop", help="X,Y,W,H in photo pixels, before the automatic crop")
@@ -284,8 +294,9 @@ def parser() -> argparse.ArgumentParser:
     col.add_argument(
         "--min-patch",
         type=_number(float, 0),
-        help="smallest island or hole in a layer, in mm²: smaller ones print as blobs and "
-        f"are merged into the area around them (default {MIN_PATCH:g}; 0 keeps them)",
+        help="lying (colour or mono): smallest island or hole in a layer, in mm²: smaller "
+        f"ones print as blobs and are merged into the area around them (default "
+        f"{MIN_PATCH:g} in colour, {MIN_PATCH_MONO:g} in mono; 0 keeps them)",
     )
     col.add_argument("--focus", help=FOCUS_HELP + "; the map goes to focus.png")
     col.add_argument("--focus-floor", type=_number(float, 0.01, 1), help=FLOOR_HELP.format(FLOOR))
@@ -323,6 +334,12 @@ def parser() -> argparse.ArgumentParser:
     )
     c.add_argument("--printer", choices=list(PRINTERS), default=DEFAULT_PRINTER)
     c.add_argument("--material", choices=MATERIALS, default=DEFAULT_MATERIAL)
+    c.add_argument(
+        "--pose",
+        choices=POSES,
+        default="lying",
+        help="print it like the flat lithophanes you will make (mono: lying by default)",
+    )
     c.add_argument("--slice", action="store_true", help="also write the G-code")
     c.add_argument("-o", "--out", type=Path, default=Path("out"), help="output folder")
 
@@ -361,7 +378,7 @@ def focus_option(args: argparse.Namespace):
 
 def job_from(args: argparse.Namespace):
     from . import focus, image, optics, printers
-    from .forge import COLOR_RANGE, MIN_PATCH, SMOOTH_BACKGROUND, Job
+    from .forge import COLOR_RANGE, MAX_OVERHANG, SMOOTH_BACKGROUND, Job
 
     try:
         setup = printers.setup(
@@ -375,8 +392,6 @@ def job_from(args: argparse.Namespace):
         mono = mode == "mono"
         light = args.light or ("back" if mono else "front")
         why_mono = "--mode mono" if args.mode == "mono" else f"--shape {args.shape} (always mono)"
-        if mono and args.min_patch is not None:
-            raise ValueError(f"--min-patch is for colour prints, not {why_mono}")
         if mono and args.focus is not None:
             raise ValueError(f"--focus is for colour prints, not {why_mono}")
         for name in ("min_patch_subject", "smooth_background"):
@@ -408,7 +423,7 @@ def job_from(args: argparse.Namespace):
     tone = image.Tone(levels=args.levels, gamma=args.gamma, clahe=args.clahe, invert=args.invert)
     lo, hi = COLOR_RANGE
     color_range = (args.t_min or lo, args.t_max or hi)
-    return Job(
+    job = Job(
         photo=args.photo,
         setup=setup,
         optics=opt,
@@ -416,13 +431,14 @@ def job_from(args: argparse.Namespace):
         name=args.name,
         shape=args.shape,
         mode=mode,
+        pose=args.pose,
         colors=args.colors,
         filaments=args.filaments,
         allow_abrasive=args.allow_abrasive,
         allow_unmeasured=args.allow_unmeasured,
         color_range=color_range,
         light=light,
-        min_patch=MIN_PATCH if args.min_patch is None else args.min_patch,
+        min_patch=args.min_patch,
         min_patch_subject=args.min_patch_subject,
         smooth_background=(
             SMOOTH_BACKGROUND if args.smooth_background is None else args.smooth_background
@@ -446,11 +462,17 @@ def job_from(args: argparse.Namespace):
         pitch=args.pitch,
         max_triangles=args.max_triangles,
         view=args.view,
-        max_overhang=min(args.max_overhang, 90.0),
+        max_overhang=MAX_OVERHANG if args.max_overhang is None else min(args.max_overhang, 90.0),
         crop=crop,
         tone=tone,
         slice=args.slice,
     )
+    if args.max_overhang is not None and not job.standing:
+        raise UsageError(
+            f"--max-overhang is for panels that print standing; this {job.shape} panel prints "
+            "lying, and its relief has no ledges"
+        )
+    return job
 
 
 def cmd_make(args) -> int:
@@ -466,7 +488,7 @@ def cmd_make(args) -> int:
     light = {"front": " (light from the front)", "back": " (light from behind)"}
     print(
         f"{job.stem}: {job.shape}, {job.mode}{light[job.light] if job.mode == 'color' else ''}"
-        f", printed {'standing' if job.standing else 'lying'}"
+        f", printed {job.pose_name}"
         f", {sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, "
         f"grid {lay.cols} x {lay.rows} at {lay.pitch:.2f} mm, "
         f"{res.triangles:,} triangles, {res.volume_cm3:.1f} cm3"
@@ -589,14 +611,17 @@ def cmd_calibrate(args) -> int:
         setup = printers.setup(args.printer, args.material)
     except ValueError as e:
         raise UsageError(str(e)) from None
-    job = calibrate.default_job(setup, optics.DEFAULTS[args.material], args.out, slice_=args.slice)
+    job = calibrate.default_job(
+        setup, optics.DEFAULTS[args.material], args.out, slice_=args.slice, pose=args.pose
+    )
     try:
         res = calibrate.make(job)
     except ValueError as e:  # for example PrusaSlicer took other presets
         raise UsageError(str(e)) from None
     sx, sy, sz = res.size
     print(
-        f"{job.stem}: {sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, steps "
+        f"{job.stem}: printed {job.pose_name}, "
+        f"{sx:.1f} x {sy:.1f} x {sz:.1f} mm on the bed, steps "
         + ", ".join(f"{v:g}" for v in calibrate.STEPS)
         + " mm"
     )

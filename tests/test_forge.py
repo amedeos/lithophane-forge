@@ -43,12 +43,90 @@ def test_make_without_slicer(photo, setup, petg, tmp_path, no_slicer, shape):
     assert plan["pose"] == ("standing" if shape in forge.STANDING else "lying")
 
 
-def test_flat_size_follows_the_photo(photo, setup, petg, tmp_path, no_slicer):
-    res = forge.make(job(photo, setup, petg, tmp_path, width=60, pitch=0.4))
+@pytest.mark.parametrize("pose", forge.POSES)
+def test_flat_size_follows_the_photo(photo, setup, petg, tmp_path, no_slicer, pose):
+    res = forge.make(job(photo, setup, petg, tmp_path, width=60, pitch=0.4, pose=pose))
     width, height = res.layout.width, res.layout.height
     assert width == pytest.approx(60)
-    assert res.size[2] == pytest.approx(height)
+    up = 2 if pose == "standing" else 1  # standing, the height goes up along z
+    assert res.size[up] == pytest.approx(height)
+    assert res.size[3 - up] == pytest.approx(4.4)  # the frame, t_max + 0.8
     assert (width - 6) / (height - 6) == pytest.approx(4 / 3, rel=0.01)  # 4:3 in a 3 mm frame
+
+
+def test_mono_lying_is_on_layer_tops(photo, setup, petg, tmp_path, no_slicer):
+    """Lying, a white panel's thickness goes in whole layers, and no layer keeps an island
+    or a hole smaller than --min-patch; standing it stays smooth."""
+    from scipy import ndimage
+
+    from lithophane_forge.palette import heights
+
+    j = job(photo, setup, petg, tmp_path, width=60, pitch=0.4, min_patch=1.0)
+    rgb = image.load(photo)
+    lay = forge.layout(j, rgb.shape[1] / rgb.shape[0])
+    raw, _ = forge.thickness_map(j, rgb, lay)
+    t, found, points = forge.on_layers(j, lay, raw)
+    tops = heights(petg.t_min, petg.t_max, setup.first_layer, setup.layer)
+    assert np.array_equal(found, tops) and len(tops) == 29 and points == round(1.0 / 0.4**2)
+    seen = forge.visible_points(j, lay)
+    assert np.isin(np.round(t[seen], 6), np.round(tops, 6)).all()
+    assert np.array_equal(t[~seen], raw[~seen])  # the frame keeps its thickness
+    assert np.abs(petg.light(t[seen]) - petg.light(raw[seen])).mean() < 0.06
+    # without the filter every point is the layer top closest to it in light (no median)
+    plain, _, _ = forge.on_layers(replace(j, min_patch=0), lay, raw)
+    near = tops[np.abs(petg.light(raw[seen])[:, None] - petg.light(tops)).argmin(1)]
+    assert np.allclose(plain[seen], near)
+    for z in tops[1:]:
+        for part in (t >= z - 1e-6, t < z - 1e-6):
+            labels, _ = ndimage.label(part)
+            sizes = np.bincount(labels.ravel())[1:]
+            assert sizes.min(initial=points) >= points
+    res = forge.make(j)
+    plan = json.loads(res.files["plan"].read_text(encoding="utf-8"))
+    assert plan["pose"] == "lying" and plan["tones"] == 29 and plan["min_patch_mm2"] == 1.0
+    assert plan["tone_range_mm"] == [0.8, 3.6]
+    assert plan["max_overhang_deg"] is None and "brim_width" not in plan["object_settings"]
+    text = res.files["report"].read_text(encoding="utf-8")
+    assert "29 tones from 0.8 to 3.6 mm. In smooth" in text
+    assert "`lithophane-forge calibrate --slice`" in text
+    # the mesh itself: every height of the panel is a layer top (or the bed)
+    zs = np.unique(np.round(trimesh.load(res.files["stl"]).vertices[:, 2], 4))
+    allowed = np.round(np.concatenate([[0.0], tops, [j.frame_thickness]]), 4)
+    assert np.isin(zs, allowed).all() and len(zs) > 20
+    standing = forge.make(replace(j, pose="standing", min_patch=None, name="standing"))
+    plan = json.loads(standing.files["plan"].read_text(encoding="utf-8"))
+    assert plan["tones"] is None and plan["min_patch_mm2"] is None
+    assert "--pose standing --slice" in standing.files["report"].read_text(encoding="utf-8")
+
+
+def test_mono_lying_defaults(photo, setup, petg, tmp_path, no_slicer):
+    """A white panel lying keeps details down to one nozzle line (0.2 mm²), the colour
+    default stays 1 mm², and a frame or range off the layer grid is rounded and said."""
+    j = Job(photo=photo, setup=setup, optics=petg)
+    assert (j.smallest_patch, replace(j, mode="color").smallest_patch) == (0.2, 1.0)
+    assert j.frame_thickness == 4.4
+    assert replace(j, optics=replace(petg, t_max=3.65)).frame_thickness == 4.5  # 4.45 lying
+    assert replace(j, frame_t=4.45, pose="standing").frame_thickness == 4.45
+    off = replace(petg, t_min=0.85, t_max=3.65)
+    res = forge.make(job(photo, setup, off, tmp_path, width=40, pitch=0.5))
+    text = res.files["report"].read_text(encoding="utf-8")
+    assert "28 tones from 0.9 to 3.6 mm." in text and "thickness 0.9 to 3.6 mm" in text
+    assert "the brightest parts print at 0.9 mm and the darkest at 3.6 mm" in text
+
+
+@pytest.mark.parametrize("shape", ["curved", "cylinder"])
+def test_standing_report_names_the_standing_strip(photo, setup, petg, tmp_path, no_slicer, shape):
+    j = job(photo, setup, petg, tmp_path, shape=shape, pitch=0.5, **SIZES[shape])
+    text = forge.make(j).files["report"].read_text(encoding="utf-8")
+    assert "`lithophane-forge calibrate --pose standing --slice`), which prints standing" in text
+
+
+def test_tall_lying_panel_names_the_standing_pose(photo, setup, petg, tmp_path, no_slicer):
+    """A panel taller than the bed is deep may still fit standing."""
+    with pytest.raises(ValueError, match="or print it standing"):
+        forge.make(job(photo, setup, petg, tmp_path, height=215, pitch=1.0))
+    with pytest.raises(ValueError, match="make it smaller$"):  # colour cannot stand
+        forge.make(job(photo, setup, petg, tmp_path, height=215, pitch=1.0, mode="color"))
 
 
 def test_both_sizes_crop_the_photo(photo, setup, petg, tmp_path, no_slicer):
@@ -205,6 +283,7 @@ def test_volume_counts_every_part(photo, setup, petg, tmp_path, no_slicer):
     res = forge.make(j)
     lay = res.layout
     t, _ = forge.thickness_map(j, image.load(photo), lay)
+    t, _, _ = forge.on_layers(j, lay, t)  # mono, lying: on layer tops
     parts = forge.volumes(j, lay, t)
     assert res.volume_cm3 == pytest.approx(sum(m.volume() for _, m in parts) / 1000)
     assert res.volume_cm3 > parts[0][1].volume() / 1000 * 1.1
@@ -238,7 +317,7 @@ def test_grid_gets_coarser_for_big_panels():
 
 def test_too_tall_for_the_printer(photo, setup, petg, tmp_path, no_slicer):
     with pytest.raises(ValueError, match="prints at most"):
-        forge.make(job(photo, setup, petg, tmp_path, height=230, pitch=1.0))
+        forge.make(job(photo, setup, petg, tmp_path, height=230, pitch=1.0, pose="standing"))
 
 
 def test_too_wide_for_the_bed(setup):
@@ -259,6 +338,14 @@ def test_too_wide_for_the_bed(setup):
         ({"shape": "flat", "lamp_base": True}, "--lamp-base"),
         ({"shape": "cylinder", "width": 50}, "--diameter"),
         ({"shape": "shaped", "frame": 0}, "frame"),
+        ({"pose": "sideways"}, "unknown pose"),
+        ({"shape": "cylinder", "pose": "lying"}, "cannot lie on the bed"),
+        ({"mode": "color", "pose": "standing"}, "colour panels print lying"),
+        ({"shape": "shaped", "pose": "standing"}, "need support"),
+        ({"min_patch": -1}, "--min-patch must be"),
+        ({"shape": "cylinder", "min_patch": 1}, "a cylinder panel prints standing"),
+        ({"pose": "standing", "min_patch": 1}, "with --pose standing prints standing"),
+        ({"mode": "color", "pose": "standing", "min_patch": 1}, "colour panels print lying"),
     ],
 )
 def test_job_checks(setup, petg, tmp_path, kw, message):
@@ -284,11 +371,28 @@ def test_picture_reads_the_right_way(setup, petg, tmp_path, shape):
     seen by the viewer: from -y for view="flat" (+x is right), from +y for "relief"."""
     t = np.full((60, 80), 3.0)
     t[5:20, 5:25] = 1.0  # row 0 is the top of the picture
-    j = Job(photo=tmp_path / "x.png", setup=setup, optics=petg, shape=shape, arc=120)
+    j = Job(
+        photo=tmp_path / "x.png", setup=setup, optics=petg, shape=shape, arc=120, pose="standing"
+    )
     (x, z), (cx, cz) = thin_spot(forge.panel(j, t, 80, 60), shape, 80)
     assert z > cz and x < cx
     (x, z), (cx, cz) = thin_spot(forge.panel(replace(j, view="relief"), t, 80, 60), shape, 80)
     assert z > cz and x > cx
+
+
+def test_lying_flat_reads_the_right_way(setup, petg, tmp_path):
+    """A white flat panel lies on the bed by default: seen from below (view="flat"), the
+    viewer's left is +x; seen from the top (view="relief") it is -x."""
+    t = np.full((60, 80), 3.0)
+    t[5:20, 5:25] = 1.0  # row 0 is the top of the picture: a bright upper left
+    j = Job(photo=tmp_path / "x.png", setup=setup, optics=petg)
+    assert not j.standing
+    for view, left in (("flat", 1), ("relief", -1)):
+        v = forge.panel(replace(j, view=view), t, 80, 60).vertices
+        centre = (v.min(0) + v.max(0)) / 2
+        thin = (v[:, 2] > 0.1) & (v[:, 2] < 1.2)
+        assert v[thin, 1].mean() > centre[1]  # upper
+        assert np.sign(v[thin, 0].mean() - centre[0]) == left
 
 
 def test_shaped_reads_the_right_way(setup, petg, tmp_path):
@@ -327,7 +431,8 @@ def test_overhang_limit():
 
 
 def test_object_settings(setup, petg, tmp_path):
-    standing = forge.object_settings(Job(photo=tmp_path / "x", setup=setup, optics=petg))
+    j = Job(photo=tmp_path / "x", setup=setup, optics=petg, pose="standing")
+    standing = forge.object_settings(j)
     assert standing["fill_density"] == "100%" and standing["brim_width"] == "8"
     assert int(standing["perimeters"]) * 2 * 0.45 >= petg.t_max + 0.8
     lying = forge.object_settings(

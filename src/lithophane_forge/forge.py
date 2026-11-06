@@ -22,17 +22,20 @@ MODES = ("mono", "color")
 VIEWS = ("flat", "relief")
 COLOR_RANGE = (0.6, 3.0)  # mm: colour panels, from the thinnest stack to the frame
 MIN_PATCH = 1.0  # mm²: colour panels, the smallest island or hole a layer keeps
+MIN_PATCH_MONO = 0.2  # mm²: mono panels printed lying, about one nozzle line square
 MIN_PATCH_SUBJECT = 0.64  # mm²: with --focus, the same on the subject (0.8 x 0.8 mm)
 MIN_WIDTH = 0.4  # mm: with --focus, the subject keeps no detail narrower (a nozzle line)
 SMOOTH_BACKGROUND = 0.4  # mm: with --focus, the background's smoothing (palette.smooth_background)
 MAX_SMOOTH = 2.0  # mm: the bilateral filter's time grows with the square of its sigma
 MAX_COLORS = 8  # colour panels: filaments
-STANDING = {"flat", "curved", "cylinder"}  # the others print lying on the bed
+POSES = ("lying", "standing")
+STANDING = {"curved", "cylinder"}  # they cannot lie on the bed; the others lie by default
 DEFAULT_WIDTH = 100.0
 DEFAULT_DIAMETER = 80.0
 CYLINDER_HEIGHT = 1.25  # default cylinder height, as a share of the diameter
 MAX_ARC = 300.0  # degrees: a curved panel bent further would almost close (and topple)
 BRIM = 8.0  # mm of brim for a panel printed standing
+MAX_OVERHANG = 60.0  # degrees from vertical: the steepest ledge of a standing panel
 BED_MARGIN = 2.0  # keep this far from the bed edge (plus the brim)
 MIN_SHAPED_FRAME = 1.5  # a shaped panel's frame hides the grid's stepped edge
 
@@ -46,13 +49,14 @@ class Job:
     name: str | None = None
     shape: str = "flat"
     mode: str = "mono"  # "color": filament changes (M600), printed lying
+    pose: str | None = None  # "lying" or "standing"; None: from the shape (see standing)
     colors: int = 4  # colour mode: number of filaments
     filaments: Path | None = None  # colour mode: your own filaments instead of the catalog
     allow_abrasive: bool = False  # colour mode: also suggest abrasive filaments
     allow_unmeasured: bool = False  # room light: also translucent filaments without k and s
     color_range: tuple[float, float] = COLOR_RANGE
     light: str = "back"  # colour mode: "front" for a picture you look at in room light
-    min_patch: float = MIN_PATCH  # colour mode: see remove_specks (0: off)
+    min_patch: float | None = None  # lying panels: see smallest_patch (0: off)
     min_patch_subject: float | None = None  # with --focus: on the subject (see subject_patch)
     smooth_background: float = SMOOTH_BACKGROUND  # with --focus: mm (0: off)
     focus: str | None = None  # colour mode: the subject (a mask, X,Y,W,H, centre or subject)
@@ -69,7 +73,7 @@ class Job:
     pitch: float = 0.2  # mm between grid points
     max_triangles: int = 1_000_000
     view: str | None = None  # the face that looks at the viewer; None: from the light (face)
-    max_overhang: float = 60.0  # degrees from vertical on the relief side (90: no limit)
+    max_overhang: float = MAX_OVERHANG  # standing: degrees from vertical (90: no limit)
     crop: tuple[int, int, int, int] | None = None
     tone: Tone = field(default_factory=Tone)
     hole: bool = False  # hanging tab (flat and shaped)
@@ -93,13 +97,23 @@ class Job:
         return "relief" if self.light == "front" else "flat"
 
     @property
+    def smallest_patch(self) -> float:
+        """Lying panels: the smallest island or hole a layer keeps, in mm² (remove_specks).
+        Given, it is `min_patch`; else MIN_PATCH in colour and MIN_PATCH_MONO in mono (a
+        white panel has no specks of a wrong colour, only parts a nozzle line cannot draw).
+        A property, like `face`, so that replace(job, mode=...) follows the mode."""
+        if self.min_patch is not None:
+            return self.min_patch
+        return MIN_PATCH if self.mode == "color" else MIN_PATCH_MONO
+
+    @property
     def subject_patch(self) -> float:
         """With --focus: the smallest island or hole on the subject, in mm². Given, it is
-        `min_patch_subject` (check() keeps it at most `min_patch`); else MIN_PATCH_SUBJECT,
-        or `min_patch` when that is smaller."""
+        `min_patch_subject` (check() keeps it at most `smallest_patch`); else
+        MIN_PATCH_SUBJECT, or `smallest_patch` when that is smaller."""
         if self.min_patch_subject is not None:
             return self.min_patch_subject
-        return min(MIN_PATCH_SUBJECT, self.min_patch)
+        return min(MIN_PATCH_SUBJECT, self.smallest_patch)
 
     @property
     def front_lit(self) -> bool:
@@ -116,15 +130,34 @@ class Job:
 
     @property
     def frame_thickness(self) -> float:
-        if self.frame_t is not None:
-            return self.frame_t
-        if self.mode == "color":  # the whole stack: the frame shows the top of the path
-            return self.color_range[1]
-        return round(self.optics.t_max + 0.8, 2)
+        """`frame_t`, or in colour the whole stack (the frame shows the top of the path),
+        in mono t_max + 0.8. A white panel printed lying rounds it up to a layer top: the
+        slicer prints whole layers, and the stand's slot follows this number."""
+        if self.mode == "color":
+            return self.color_range[1] if self.frame_t is None else self.frame_t
+        t = round(self.optics.t_max + 0.8, 2) if self.frame_t is None else self.frame_t
+        if self.standing:
+            return t
+        first, layer = self.setup.first_layer, self.setup.layer
+        return round(first + layer * max(0, math.ceil((t - first) / layer - 1e-9)), 4)
 
     @property
     def standing(self) -> bool:
-        return self.shape in STANDING and self.mode == "mono"
+        """The panel prints standing: `pose`, or when it is None curved panels and
+        cylinders stand and the others lie on the bed (check() keeps the pose possible)."""
+        if self.pose is not None:
+            return self.pose == "standing"
+        return self.shape in STANDING
+
+    @property
+    def pose_name(self) -> str:
+        """How the output names the pose."""
+        return "standing" if self.standing else "lying"
+
+    @property
+    def pose_flag(self) -> str:
+        """The option that gives a flat panel (a calibration strip, a lithophane) this pose."""
+        return " --pose standing" if self.standing else ""
 
     def check(self) -> None:
         if self.shape not in SHAPES:
@@ -133,6 +166,17 @@ class Job:
             raise ValueError(f"unknown mode {self.mode!r}; choose from {', '.join(MODES)}")
         if self.light not in LIGHTS:
             raise ValueError(f"unknown light {self.light!r}; choose from {', '.join(LIGHTS)}")
+        if self.pose is not None and self.pose not in POSES:
+            raise ValueError(f"unknown pose {self.pose!r}; choose from {', '.join(POSES)}")
+        if self.pose == "lying" and self.shape in STANDING:
+            raise ValueError(f"a {self.shape} panel prints standing: it cannot lie on the bed")
+        if self.pose == "standing" and self.mode == "color":
+            raise ValueError("colour panels print lying: the filament changes go by layer height")
+        if self.pose == "standing" and self.shape == "shaped":
+            raise ValueError(
+                "a shaped panel prints lying: standing, the lower half of its outline would "
+                "need support"
+            )
         if self.front_lit:
             if self.mode != "color":
                 raise ValueError(
@@ -144,6 +188,15 @@ class Job:
                     "with light from the front you look at the top face (--view relief): "
                     "the flat face lies on the bed and shows only the first filament"
                 )
+        if self.min_patch is not None:
+            if self.standing:
+                given = "with --pose standing " if self.pose == "standing" else ""
+                raise ValueError(
+                    f"--min-patch is for panels that print lying; a {self.shape} panel "
+                    f"{given}prints standing, and its thickness is not cut into layers"
+                )
+            if not math.isfinite(self.min_patch) or self.min_patch < 0:
+                raise ValueError("--min-patch must be a number, 0 (off) or more")
         if self.mode == "color":
             if self.shape not in ("flat", "shaped"):
                 raise ValueError("colour panels print lying: use --shape flat or shaped")
@@ -166,22 +219,32 @@ class Job:
                 )
             if self.tone.invert or self.tone.clahe > 0:
                 raise ValueError("--invert and --clahe work in mono mode only (--mode mono)")
-            if not math.isfinite(self.min_patch) or self.min_patch < 0:
-                raise ValueError("--min-patch must be a number, 0 (off) or more")
             if self.min_patch_subject is not None:
                 given = self.min_patch_subject
                 if not math.isfinite(given) or given < 0:
                     raise ValueError("--min-patch-subject must be a number, 0 (off) or more")
-                if given > self.min_patch:
+                if given > self.smallest_patch:
                     raise ValueError(
                         f"--min-patch-subject {given:g} mm² is larger than --min-patch "
-                        f"{self.min_patch:g} mm²: the subject cannot be cleaner than the rest; "
+                        f"{self.smallest_patch:g} mm²: the subject cannot be cleaner than the "
+                        "rest; "
                         "raise --min-patch too"
                     )
             smooth = self.smooth_background
             if not math.isfinite(smooth) or not 0 <= smooth <= MAX_SMOOTH:
                 raise ValueError(
                     f"--smooth-background must be between 0 (off) and {MAX_SMOOTH:g} mm"
+                )
+        if self.mode == "mono" and not self.standing:
+            from .palette import heights
+
+            o, s = self.optics, self.setup
+            n = len(heights(o.t_min, o.t_max, s.first_layer, s.layer))
+            if n < 2:
+                raise ValueError(
+                    f"the thickness range {o.t_min:g} to {o.t_max:g} mm holds {n} layer tops "
+                    f"of {s.layer:g} mm, so the picture would have no tones: widen "
+                    "--t-min/--t-max"
                 )
         if self.focus is not None:
             if self.mode != "color":
@@ -251,7 +314,8 @@ class Result:
     accessories: dict[str, dict] = field(default_factory=dict)
     colour: object = None  # palette.Plan in colour mode
     colour_changes: list[tuple[float, str]] = field(default_factory=list)
-    speck_points: int = 0  # colour mode: grid points of the smallest patch a layer keeps
+    speck_points: int = 0  # lying panels: grid points of the smallest patch a layer keeps
+    tops: np.ndarray | None = None  # mono, lying: the layer tops from t_min to t_max (tones)
     subject_points: int = 0  # with --focus: the same on the subject
     subject_width: int = 1  # with --focus: grid points of the narrowest detail it keeps
     subject_share: float | None = None  # with --focus: the share of the picture it marks
@@ -388,12 +452,7 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
         focus.check_subject(subject, job.focus)
         share = float(subject[seen[box]].mean())
         notes += [n for n in [focus.mask_note(spec, size)] if n]
-    points = round(job.min_patch / lay.pitch**2)
-    if points >= seen.sum():
-        raise ValueError(
-            f"--min-patch {job.min_patch:g} mm² is as large as the whole picture "
-            f"({seen.sum() * lay.pitch**2:.0f} mm²): use a smaller value"
-        )
+    points = patch_points(job, lay, seen)
     width = 1
     if subject is not None:
         near = palette.smooth_background(target, weight, job.smooth_background / lay.pitch)
@@ -407,7 +466,7 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
         job.filaments, job.allow_abrasive, job.light, job.allow_unmeasured
     )
     plan = palette.plan(target, job.colors, h, choices, source, job.light, weight, job.focus_floor)
-    frame = int(np.clip(np.searchsorted(h, job.frame_thickness + 1e-9) - 1, 0, len(h) - 1))
+    frame = frame_layer(h, job.frame_thickness)
 
     def smoothed(fit):
         """The heights that print (smooth_heights, then no specks, with the frame around
@@ -446,6 +505,60 @@ def colour_map(job: Job, rgb: np.ndarray, lay: Layout) -> ColourMap:
     return ColourMap(
         plan, t, *sims, photo, points, notes, values, subject, share, found, small, width
     )
+
+
+def frame_layer(tops: np.ndarray, thickness: float) -> int:
+    """The index of the highest layer top at or below the frame's `thickness` (the first
+    one when all are above it): the height at which remove_specks puts the frame."""
+    return int(np.clip(np.searchsorted(tops, thickness + 1e-9) - 1, 0, len(tops) - 1))
+
+
+def patch_points(job: Job, lay: Layout, seen: np.ndarray) -> int:
+    """`--min-patch` in grid points: remove_specks's limit for the `seen` points."""
+    points = round(job.smallest_patch / lay.pitch**2)
+    if points >= seen.sum():
+        raise ValueError(
+            f"--min-patch {job.smallest_patch:g} mm² is as large as the whole picture "
+            f"({seen.sum() * lay.pitch**2:.0f} mm²): use a smaller value"
+        )
+    return points
+
+
+def on_layers(job: Job, lay: Layout, t_view: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+    """Mono, lying: the thickness of every point of the picture on a layer top, as the
+    slicer prints it.
+
+    Each point takes the layer top whose light is closest to its own. The edge of every
+    layer then follows the noise of the photo, so remove_specks (`--min-patch`) leaves no
+    smaller island or hole in any layer: below about one nozzle line they do not print as
+    drawn, and they cost travel and strings. There is no 3 x 3 median as in colour: in
+    white plastic it removes detail (local contrast), not specks of a wrong colour. The
+    points under the frame count as the layer nearest to the frame's thickness, as in a
+    colour print. Returns the map (row 0 at the top), the layer tops from t_min to t_max
+    (the tones) and remove_specks's limit in points.
+
+    remove_specks runs its regional filter with no point marked: that gives the same result
+    as scikit-image's area filters (a test checks it) and is about ten times faster. The
+    colour path without --focus keeps scikit-image, so that its plans stay byte-identical."""
+    from .palette import heights
+
+    o = job.optics
+    tops = heights(o.t_min, o.t_max, job.setup.first_layer, job.setup.layer)
+    light = o.light(tops)
+    # the thickness whose light lies halfway between two layer tops: the edge between them
+    edges = o.t_min - o.attenuation * np.log((light[:-1] + light[1:]) / 2)
+    in_v, in_u, _ = picture_cells(job, lay)
+    box = np.ix_(in_v, in_u)
+    seen = visible_points(job, lay)
+    points = patch_points(job, lay, seen)
+    frame = frame_layer(tops, job.frame_thickness)
+    full = np.full((lay.rows, lay.cols), frame)
+    full[box] = np.searchsorted(edges, t_view[box])
+    none = np.zeros(full.shape, dtype=bool)
+    idx = remove_specks(full, points, ~seen, frame, subject=none, subject_cells=points)
+    t = t_view.copy()
+    t[box] = tops[idx[box]]
+    return t, tops, points
 
 
 def visible_points(job: Job, lay: Layout) -> np.ndarray:
@@ -494,7 +607,8 @@ def remove_specks(
     subject: np.ndarray | None = None,
     subject_cells: int = 0,
 ) -> np.ndarray:
-    """Colour mode: no layer of the print keeps an island or a hole smaller than `cells`
+    """Colour mode (and mono panels printed lying): no layer of the print keeps an island
+    or a hole smaller than `cells`
     grid points. `idx` holds a height (index) per point; a layer is the set of points at
     least that high. An island smaller than about two nozzle widths prints as a blob, and
     in the picture it is a speck of the wrong colour.
@@ -574,12 +688,12 @@ def _mirror_x(m: mesh.Mesh) -> mesh.Mesh:
 def volumes(job: Job, lay: Layout, t_view: np.ndarray) -> list[tuple[str, mesh.Mesh]]:
     """The volumes of the panel object, before placement.
 
-    Standing shapes: the flat face is at y = 0 (or on the outer radius) and the viewer of
-    the flat face stands at -y. Lying shapes: the flat face is on the bed and is seen from
+    Standing panels: the flat face is at y = 0 (or on the outer radius) and the viewer of
+    the flat face stands at -y. Lying panels: the flat face is on the bed and is seen from
     below, so left and right swap."""
     t = np.flipud(t_view)  # the mesh grid has row 0 at the bottom
     w, h, ft = lay.width, lay.height, job.frame_thickness
-    if not job.standing:  # shaped panels and colour panels lie on the bed
+    if not job.standing:  # flat and shaped panels lie on the bed (colour and mono)
         from shapely.geometry import box
 
         from . import accessories, shapes
@@ -626,9 +740,13 @@ def panel(job: Job, t_view: np.ndarray, width: float, height: float) -> mesh.Mes
 
 
 def place(
-    parts: list[tuple[str, mesh.Mesh]], bed: tuple[float, float, float], brim: float
+    parts: list[tuple[str, mesh.Mesh]],
+    bed: tuple[float, float, float],
+    brim: float,
+    hint: str = "",
 ) -> list[tuple[str, mesh.Mesh]]:
-    """Centre the parts together on the bed, with room for the brim."""
+    """Centre the parts together on the bed, with room for the brim. `hint` ends the
+    message of a panel too large for the bed (another way to make it fit)."""
     allv = np.concatenate([m.vertices for _, m in parts])
     lo, hi = allv.min(0), allv.max(0)
     sx, sy, sz = hi - lo
@@ -641,7 +759,7 @@ def place(
     if sx > room[0] or sy > room[1]:
         raise ValueError(
             f"the panel ({sx:.0f} x {sy:.0f} mm on the bed{', plus the brim' if brim else ''}) "
-            f"does not fit the {bed[0]:.0f} x {bed[1]:.0f} mm bed: make it smaller"
+            f"does not fit the {bed[0]:.0f} x {bed[1]:.0f} mm bed: make it smaller{hint}"
         )
     c = (lo + hi) / 2
     offset = (bed[0] / 2 - c[0], bed[1] / 2 - c[1], -lo[2])
@@ -709,6 +827,8 @@ def make(job: Job) -> Result:
         res.notes += colour_notes(job, cmap.plan) + cmap.notes
     else:
         t_view, photo = thickness_map(job, rgb, lay)
+        if not job.standing:  # the slicer prints whole layers
+            t_view, res.tops, res.speck_points = on_layers(job, lay, t_view)
     if job.standing:
         t_view = limit_overhangs(t_view, job.max_overhang, lay.height / (lay.rows - 1))
     in_v, in_u, copies = picture_cells(job, lay)  # the grid one copy of the photo fills
@@ -716,7 +836,10 @@ def make(job: Job) -> Result:
     res.notes += image.analyse(photo, grid, colour=job.mode == "color").notes
     if job.shape == "cylinder":
         res.notes += cylinder_notes(job, lay, cropped.shape[1] / cropped.shape[0])
-    parts = place(volumes(job, lay, t_view), job.setup.bed, BRIM if job.standing else 0.0)
+    hint = ""
+    if job.mode == "mono" and job.shape == "flat" and not job.standing:
+        hint = ", or print it standing (--pose standing): its height then goes up"
+    parts = place(volumes(job, lay, t_view), job.setup.bed, BRIM if job.standing else 0.0, hint)
     whole = mesh.merge([m for _, m in parts])
     res.size = tuple(float(s) for s in whole.size)
     res.triangles = len(whole.faces)
@@ -1007,7 +1130,7 @@ def write_plan(job: Job, res: Result) -> None:
         "photo": str(job.photo),
         "mode": job.mode,
         "shape": job.shape,
-        "pose": "standing" if job.standing else "lying",
+        "pose": job.pose_name,
         "outer_mm": [round(lay.width, 2), round(lay.height, 2)],
         "arc_deg": job.arc if job.shape == "curved" else None,
         "diameter_mm": round(2 * lay.radius, 2) if job.shape == "cylinder" else None,
@@ -1021,8 +1144,12 @@ def write_plan(job: Job, res: Result) -> None:
         "pitch_mm": round(lay.pitch, 4),
         "optics": asdict(job.optics) if job.mode == "mono" else None,
         "color_range_mm": list(job.color_range) if job.mode == "color" else None,
-        "min_patch_mm2": job.min_patch if job.mode == "color" else None,
-        "min_patch_points": res.speck_points if job.mode == "color" else None,
+        "min_patch_mm2": None if job.standing else job.smallest_patch,
+        "min_patch_points": None if job.standing else res.speck_points,
+        "tones": None if res.tops is None else len(res.tops),
+        "tone_range_mm": None
+        if res.tops is None
+        else [round(float(res.tops[i]), 4) for i in (0, -1)],
         "focus": focus_plan(job, res),
         "light": job.light,
         "tone": asdict(job.tone),
@@ -1167,7 +1294,7 @@ def speck_lines(job: Job, res: Result) -> list[str]:
         return [speck_line(job, res)]
     pitch, limit = res.layout.pitch, job.subject_patch
     # the subject's limit comes from --min-patch when that is smaller than the default
-    given = job.min_patch_subject is not None or job.min_patch >= MIN_PATCH_SUBJECT
+    given = job.min_patch_subject is not None or job.smallest_patch >= MIN_PATCH_SUBJECT
     option = "--min-patch-subject" if given else "--min-patch"
     width = f"details from {res.subject_width * pitch:.1f} mm wide"
     if res.subject_points > 1:
@@ -1196,15 +1323,21 @@ def speck_lines(job: Job, res: Result) -> list[str]:
 def speck_line(job: Job, res: Result, rest: bool = False) -> str:
     """The speck filter in one line; `rest`: with --focus, about the rest of the picture."""
     where = "in the rest of the picture, " if rest else ""
-    if res.speck_points > 1:
+    if res.speck_points > 1 and job.mode == "mono":
         text = (
-            f"{where}islands and holes smaller than {job.min_patch:g} mm² in a layer are "
+            f"islands and holes smaller than {job.smallest_patch:g} mm² in a layer are merged "
+            "into the area around them: a nozzle line cannot draw them, and they cost travel "
+            "and strings (--min-patch, 0 keeps them)."
+        )
+    elif res.speck_points > 1:
+        text = (
+            f"{where}islands and holes smaller than {job.smallest_patch:g} mm² in a layer are "
             "merged into the area around them: they would print as blobs (--min-patch, 0 "
             "keeps them)."
         )
-    elif job.min_patch > 0:
+    elif job.smallest_patch > 0:
         text = (
-            f"{where}--min-patch {job.min_patch:g} mm² is not larger than one grid point "
+            f"{where}--min-patch {job.smallest_patch:g} mm² is not larger than one grid point "
             f"({res.layout.pitch:.2f} mm apart), so small islands and holes are kept: some "
             "may print as blobs."
         )
@@ -1213,9 +1346,43 @@ def speck_line(job: Job, res: Result, rest: bool = False) -> str:
     return "- " + text[0].upper() + text[1:]
 
 
+def mono_lines(job: Job, res: Result) -> list[str]:
+    """The report's lines about a white print: the filament, the tones, the calibration."""
+    from .optics import DEFAULTS
+
+    s, o = job.setup, job.optics
+    lines = [f"- Use **white** {s.material.upper()}."]
+    if res.tops is not None:
+        lo, hi = float(res.tops[0]), float(res.tops[-1])
+        off = ""
+        if lo > o.t_min + 1e-9 or hi < o.t_max - 1e-9:
+            off = (
+                f" --t-min {o.t_min:g} and --t-max {o.t_max:g} are not both layer tops: the "
+                f"brightest parts print at {lo:g} mm and the darkest at {hi:g} mm."
+            )
+        lines += [
+            (
+                f"- Lying, the thickness goes up in steps of one layer ({s.layer:g} mm): the "
+                f"picture has {len(res.tops)} tones from {lo:g} to {hi:g} mm.{off} In smooth "
+                "areas such as a sky the steps can show as faint contour lines."
+            ),
+            speck_line(job, res),
+        ]
+    if o == DEFAULTS[s.material]:
+        lines.append(
+            "- The thickness range and td are estimates for white "
+            f"{s.material.upper()}: print the calibration strip (`lithophane-forge "
+            f"calibrate{job.pose_flag} --slice`), which prints {job.pose_name} like this "
+            "panel, and pass your own --t-min, --t-max and --td."
+        )
+    return lines
+
+
 def report(job: Job, res: Result) -> str:
     s, lay = job.setup, res.layout
     t_min, t_max = job.color_range if job.mode == "color" else (job.optics.t_min, job.optics.t_max)
+    if res.tops is not None:  # mono, lying: what prints
+        t_min, t_max = float(res.tops[0]), float(res.tops[-1])
     what = {
         "flat": "flat panel",
         "curved": f"curved panel ({job.arc:g}° arc)",
@@ -1247,7 +1414,7 @@ def report(job: Job, res: Result) -> str:
     if job.mode == "color":
         lines += colour_report(job, res)
     else:
-        lines.append(f"- Use **white** {s.material.upper()}.")
+        lines += mono_lines(job, res)
     if job.standing:
         lines.append("- It prints standing, with a brim. Remove the brim with care.")
     else:

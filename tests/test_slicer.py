@@ -1,5 +1,6 @@
 """End to end with the PrusaSlicer command line (deselect with -m 'not slicer')."""
 
+import re
 import zipfile
 from pathlib import Path
 
@@ -15,8 +16,9 @@ pytestmark = [
 ]
 
 
-@pytest.fixture(scope="module")
-def made(tmp_path_factory):
+@pytest.fixture(scope="module", params=forge.POSES)
+def made(tmp_path_factory, request):
+    """A white flat panel, sliced, in both poses (lying is the default)."""
     from conftest import write_photo
 
     tmp = tmp_path_factory.mktemp("slice")
@@ -29,6 +31,7 @@ def made(tmp_path_factory):
         out=tmp / "out",
         width=40,
         pitch=0.4,
+        pose=request.param,
         slice=True,
     )
     return j, forge.make(j)
@@ -61,7 +64,14 @@ def test_project_carries_the_printer(made, tmp_path):
     assert info["printer"] == j.setup.printer_preset
     assert info["filament_g"] == res.sliced["lithophane"]["filament_g"]
     assert "; fill_density = 100%" not in text  # the 100 % is the object's, not the preset's
-    assert ";TYPE:Skirt/Brim" in text
+    assert (";TYPE:Skirt/Brim" in text) is j.standing  # standing panels get a brim
+    if not j.standing:  # lying: the preset's layers up to the frame, nothing finer
+        from lithophane_forge.palette import heights
+
+        tops = heights(0.0, j.frame_thickness, j.setup.first_layer, j.setup.layer)
+        zs = re.findall(r"^;Z:([\d.]+)", text, re.MULTILINE)
+        found = sorted({round(float(z), 3) for z in zs})
+        assert found == [round(float(z), 3) for z in tops]
 
 
 def test_needs_no_support(made, tmp_path):
@@ -209,11 +219,12 @@ def test_calibration_slices(tmp_path):
 
 
 def test_calibration_needs_no_support(tmp_path):
-    """The label glyphs are narrow pockets: their tops are bridges, not overhangs."""
+    """Standing, the label glyphs are narrow pockets: their tops are bridges, not overhangs
+    (lying, they open to the top)."""
     from lithophane_forge import calibrate
 
     setup = printers.setup("mk4", "petg")
-    job = calibrate.default_job(setup, DEFAULTS["petg"], tmp_path)
+    job = calibrate.default_job(setup, DEFAULTS["petg"], tmp_path, pose="standing")
     res = calibrate.make(job)
     out = tmp_path / "support.gcode"
     threshold = 90 - job.max_overhang - 5

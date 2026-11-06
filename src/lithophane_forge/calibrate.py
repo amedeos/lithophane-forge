@@ -1,14 +1,16 @@
 """A calibration print: steps of known thickness, to measure your white filament.
 
-The strip prints standing, with the same settings as a lithophane, so the light goes
-through the same structure of walls and infill. Under every step its thickness is
-written in thin plastic inside a darker, 2 mm label band: lit from behind, the numbers glow.
+The strip prints like a flat lithophane, lying on the bed by default (standing with
+--pose standing), with the same settings, so the light goes through the same structure of
+layers, walls and infill. Under every step its thickness is written in thin plastic inside a
+darker, 2 mm label band: lit from behind, the numbers glow.
 
 Hold the strip against the light you will use and read:
 - t_max: the first step that looks black (thicker steps look the same);
 - td: about 0.55 x that thickness (the step that lets about 10 % of the light through);
 - t_min: the thinnest step that is still even and strong (0.8 mm is a safe choice).
-Then use them: lithophane-forge make photo.jpg --t-min ... --t-max ... --td ...
+Then use them: lithophane-forge make photo.jpg --mode mono --t-min ... --t-max ... --td ...
+(add --pose standing for a strip and panels printed standing).
 """
 
 from dataclasses import replace
@@ -26,8 +28,8 @@ STEP_H = 20.0  # mm of plain plastic per step
 LABEL_H = 8.0  # mm of label band under the steps
 FRAME = 3.0
 FRAME_T = round(STEPS[-1] + 0.8, 2)
-# the label band: 0.8 mm glyphs in it let about 3x more light through, and its pockets are
-# shallow enough to print without support (PrusaSlicer's support probe in test_slicer.py)
+# the label band: 0.8 mm glyphs in it let about 3x more light through; standing, its pockets
+# are shallow enough to print without support (PrusaSlicer's support probe in test_slicer.py)
 BAND_T = 2.0
 
 
@@ -47,12 +49,14 @@ def labels(texts: list[str], cols: int, rows: int) -> np.ndarray:
 
 
 def wedge(job: Job) -> tuple[np.ndarray, Layout]:
-    """The thickness map (as the viewer sees it) and its layout, ready to print standing.
+    """The thickness map (as the viewer sees it) and its layout.
 
-    The overhang limit comes before the labels: every glyph is a narrow pocket in the label
-    band, and the limit would fill it. The band is only BAND_T thick, so the pockets are
-    shallow: their tops are short bridges and the counters (inside an 8 or a 4) print
-    without support."""
+    Every step and the label band are layer tops (with first layers of 0.2 mm and layers of
+    0.1 or 0.05 mm), so lying the strip needs no rounding. Lying, each glyph is a pocket open
+    to the top. Standing, the overhang limit comes before the labels: every glyph is a narrow
+    pocket in the label band, and the limit would fill it. The band is only BAND_T thick, so
+    the pockets are shallow: their tops are short bridges and the counters (inside an 8 or
+    a 4) print without support."""
     width = len(STEPS) * STEP_W + 2 * FRAME
     height = STEP_H + LABEL_H + 2 * FRAME
     rows, cols, pitch = forge.grid(width, height, job.pitch, job.max_triangles)
@@ -67,7 +71,8 @@ def wedge(job: Job) -> tuple[np.ndarray, Layout]:
         t[np.ix_(steps, inside_u & (step == k))] = thick
     label_area = (v < FRAME + LABEL_H) & (v >= FRAME)
     t[np.ix_(label_area, inside_u)] = BAND_T
-    t = forge.limit_overhangs(t, job.max_overhang, height / (rows - 1))
+    if job.standing:
+        t = forge.limit_overhangs(t, job.max_overhang, height / (rows - 1))
     band = (v < FRAME + LABEL_H - 1) & (v > FRAME + 1)
     ri, ci = int(band.sum()), int(inside_u.sum())
     mask = labels([f"{s:g}" for s in STEPS], ci, ri)
@@ -88,9 +93,12 @@ def make(job: Job) -> Result:
         hole=False,
         stand=False,
     )
+    job.check()
     t, lay = wedge(job)
     res = Result(layout=lay)
-    parts = forge.place(forge.volumes(job, lay, t), job.setup.bed, forge.BRIM)
+    parts = forge.place(
+        forge.volumes(job, lay, t), job.setup.bed, forge.BRIM if job.standing else 0
+    )
     whole = mesh.merge([m for _, m in parts])
     res.size = tuple(float(s) for s in whole.size)
     res.triangles = len(whole.faces)
@@ -146,8 +154,11 @@ def report(job: Job, res: Result) -> str:
             f"`{s.filament_preset}`."
         ),
         (
-            "- Use the spool you will print lithophanes with. The strip prints standing, with the "
-            "same settings as a lithophane."
+            "- Use the spool you will print lithophanes with. The strip prints "
+            f"{job.pose_name}, with the same settings as a flat lithophane that prints "
+            f"{'standing (--pose standing)' if job.standing else 'lying (the default)'}: "
+            "the light crosses the plastic differently in the two poses, so measure the one "
+            "you print."
         ),
     ]
     for info in res.sliced.values():
@@ -165,19 +176,26 @@ def report(job: Job, res: Result) -> str:
         "- **td**: about 0.55 x t_max (the thickness that lets about 10 % of the light through).",
         "- **t_min**: the thinnest step that is still even and strong (0.8 mm is safe).",
         "",
-        "Then: `lithophane-forge make photo.jpg --t-min T_MIN --t-max T_MAX --td TD`.",
+        (
+            f"Then: `lithophane-forge make photo.jpg --mode mono{job.pose_flag} --t-min T_MIN "
+            "--t-max T_MAX --td TD`."
+        ),
         "",
     ]
     return "\n".join(lines)
 
 
-def default_job(setup, optics, out: Path, pitch: float = 0.2, slice_: bool = False) -> Job:
+def default_job(
+    setup, optics, out: Path, pitch: float = 0.2, slice_: bool = False, pose: str | None = None
+) -> Job:
+    standing = "-standing" if pose == "standing" else ""
     return Job(
         photo=Path("calibration"),
         setup=setup,
         optics=optics,
         out=out,
-        name=f"calibration-{setup.material}",
+        name=f"calibration-{setup.material}{standing}",
+        pose=pose,
         frame_t=FRAME_T,
         pitch=pitch,
         slice=slice_,

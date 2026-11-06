@@ -2,8 +2,9 @@
 
 Every name below exists in PrusaSlicer's PrusaResearch bundle (config_version 2.4.14,
 PrusaSlicer 2.9.6). `tests/test_printers.py` checks them against the installed bundle.
-We use the finest "0.10mm" print preset: a lithophane printed standing gets its
-vertical resolution from the layer height. Only the 0.4 mm nozzle is in the table; for
+We use the finest "0.10mm" print preset: lying, the layer height is the step of the
+thickness (the tones of a white panel, the change heights of a colour one); standing, it
+is the vertical resolution. Only the 0.4 mm nozzle is in the table; for
 other nozzles pass the three preset names yourself (--printer-preset and friends).
 """
 

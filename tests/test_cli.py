@@ -76,6 +76,51 @@ def test_colour_is_the_default(photo, argv, mode):
 
 
 @pytest.mark.parametrize(
+    "argv, standing",
+    [
+        ([], False),
+        (["--mode", "mono"], False),
+        (["--mode", "mono", "--shape", "shaped"], False),
+        (["--mode", "mono", "--pose", "standing"], True),
+        (["--shape", "curved"], True),
+        (["--shape", "cylinder"], True),
+    ],
+)
+def test_lying_is_the_default(photo, argv, standing):
+    """White flat panels lie on the bed like colour ones; --pose standing makes them stand.
+    Curved panels and cylinders cannot lie."""
+    from lithophane_forge import job_from, parser
+
+    job = job_from(parser().parse_args(["make", str(photo), *argv]))
+    job.check()
+    assert job.standing is standing
+
+
+def test_max_overhang_goes_with_standing(photo):
+    from lithophane_forge import job_from, parser
+    from lithophane_forge.forge import MAX_OVERHANG
+
+    def overhang(*argv):
+        return job_from(parser().parse_args(["make", str(photo), "--mode", "mono", *argv]))
+
+    assert overhang("--pose", "standing", "--max-overhang", "45").max_overhang == 45
+    assert overhang("--shape", "curved", "--max-overhang", "95").max_overhang == 90
+    assert overhang().max_overhang == MAX_OVERHANG == 60
+
+
+def test_min_patch_works_lying_in_mono(photo):
+    """Lying, a white panel removes only what a nozzle line cannot draw, by default."""
+    from lithophane_forge import job_from, parser
+    from lithophane_forge.forge import MIN_PATCH, MIN_PATCH_MONO
+
+    def patch(*argv):
+        return job_from(parser().parse_args(["make", str(photo), *argv])).smallest_patch
+
+    assert patch("--mode", "mono", "--min-patch", "2") == 2
+    assert (patch("--mode", "mono"), patch()) == (MIN_PATCH_MONO, MIN_PATCH) == (0.2, 1.0)
+
+
+@pytest.mark.parametrize(
     "argv, light, view",
     [
         ([], "front", "relief"),
@@ -139,16 +184,36 @@ def test_help_shows_no_none_defaults(capsys):
         (["make", "{photo}", "--t-min", "3", "--t-max", "2"], "range 3 to 2 mm"),
         (["make", "{photo}", "--crop", "1,2,3"], "X,Y,W,H"),
         (
-            ["make", "{photo}", "--mode", "mono", "--height", "500", "--pitch", "1"],
+            ["make", "{photo}", "--mode", "mono", "--pose", "standing", "--height", "500"],
             "prints at most",
         ),
+        (["make", "{photo}", "--mode", "mono", "--height", "500", "--pitch", "1"], "does not fit"),
         (["make", "{photo}", "--height", "500", "--pitch", "1"], "does not fit"),
         (["make", "{photo}", "--clahe", "0.01"], "--mode mono"),
         (["make", "{photo}", "--td", "2"], "--td is for white prints"),
         (["make", "{photo}", "--mode", "mono", "--light", "front"], "for colour prints"),
         (["make", "{photo}", "--view", "flat"], "--view relief"),
-        (["make", "{photo}", "--mode", "mono", "--min-patch", "2"], "not --mode mono"),
-        (["make", "{photo}", "--shape", "cylinder", "--min-patch", "2"], "cylinder (always mono)"),
+        (
+            ["make", "{photo}", "--mode", "mono", "--pose", "standing", "--min-patch", "2"],
+            "with --pose standing prints standing",
+        ),
+        (["make", "{photo}", "--shape", "cylinder", "--min-patch", "2"], "panel prints standing"),
+        (
+            ["make", "{photo}", "--pose", "standing", "--min-patch", "2"],
+            "colour panels print lying",
+        ),
+        (["make", "{photo}", "--mode", "mono", "--max-overhang", "45"], "prints lying"),
+        (["make", "{photo}", "--max-overhang", "45"], "--max-overhang is for panels"),
+        (["make", "{photo}", "--pose", "standing"], "colour panels print lying"),
+        (
+            ["make", "{photo}", "--shape", "shaped", "--mode", "mono", "--pose", "standing"],
+            "need support",
+        ),
+        (["make", "{photo}", "--shape", "curved", "--pose", "lying"], "cannot lie on the bed"),
+        (
+            ["make", "{photo}", "--mode", "mono", "--t-min", "0.81", "--t-max", "0.89"],
+            "no tones",
+        ),
         (["make", "{photo}", "--light", "back", "--allow-unmeasured"], "not --light back"),
         (["make", "{photo}", "--mode", "mono", "--allow-unmeasured"], "not --mode mono"),
         (
@@ -206,13 +271,12 @@ def test_min_patch_reaches_the_job(photo, capsys):
     from lithophane_forge import forge, job_from, parser
 
     p = parser()
-    assert job_from(p.parse_args(["make", str(photo)])).min_patch == forge.MIN_PATCH
-    assert job_from(p.parse_args(["make", str(photo), "--min-patch", "0"])).min_patch == 0
+    assert job_from(p.parse_args(["make", str(photo)])).smallest_patch == forge.MIN_PATCH
+    assert job_from(p.parse_args(["make", str(photo), "--min-patch", "0"])).smallest_patch == 0
     with pytest.raises(SystemExit):
         main(["make", "--help"])
-    assert f"(default {forge.MIN_PATCH:g}; 0 keeps them)" in " ".join(
-        capsys.readouterr().out.split()
-    )
+    wanted = f"(default {forge.MIN_PATCH:g} in colour, {forge.MIN_PATCH_MONO:g} in mono; 0 keeps"
+    assert wanted in " ".join(capsys.readouterr().out.split())
 
 
 def test_allow_abrasive_reaches_the_job(photo, tmp_path):
